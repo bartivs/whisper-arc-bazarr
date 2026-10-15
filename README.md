@@ -71,7 +71,7 @@ services:
       - ./bazarr/patch_provider.py:/opt/whisper-arc/patch_provider.py:ro
 ```
 
-Ensure `bazarr/90-whisper-translation.sh` is executable, then recreate **only Bazarr** using your own stack command. The hook verifies a known upstream SHA-256 and compiles the result before writing. It is idempotent; unknown provider versions are rejected, not modified. Review/retest the hook before upgrading the Bazarr pin. LinuxServer may continue starting after an init-hook error, so check logs for `Whisper Arc Spanish provider extension verified`; a running container alone does not prove the extension loaded.
+Ensure `bazarr/90-whisper-translation.sh` is executable, then recreate **only Bazarr** using your own stack command. The hook verifies a known upstream SHA-256 and compiles the result before writing. It is idempotent; unknown provider versions are rejected, not modified. The hook runs on every container start, so upgrading this file changes its marker: **recreate** the Bazarr container rather than restarting it, otherwise the hook stops with `Older Whisper extension found; recreate the Bazarr container to re-apply this hook` and the previous patch (still functional) stays in the container layer. Review/retest the hook before upgrading the Bazarr pin. LinuxServer may continue starting after an init-hook error, so check logs for `Whisper Arc Spanish provider extension verified`; a running container alone does not prove the extension loaded.
 
 In Bazarr keep the Whisper endpoint above, select a **Spanish** language profile, then manually search an English-audio episode. The result appears under **Whisper**, not as a separate provider. Clicking download transcribes on Arc then translates text on CPU. Spanish-audio transcription remains native Whisper.
 
