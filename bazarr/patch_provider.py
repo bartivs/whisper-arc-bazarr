@@ -11,13 +11,15 @@ import sys
 from pathlib import Path
 
 UPSTREAM_SHA256 = "257c450de9c0e2fa86a30582f9b8b4446756b197755c2c354a9ed604bdc92ed7"  # pragma: allowlist secret (public source checksum)
-MARKER = "# whisper-arc-bazarr Spanish provider extension v1"
+MARKER = "# whisper-arc-bazarr Spanish provider extension v2"
+PREVIOUS_MARKER = "# whisper-arc-bazarr Spanish provider extension v1"
 REPLACEMENTS = [
     ('            if language.alpha3 != "eng":',
      '            if language.alpha3 != "eng" and not (language.alpha3 == "spa" and sub.audio_language == "eng" and self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):'),
     ('        if subtitle.task == "error":',
      '        if subtitle.task == "translate" and subtitle.language.alpha3 == "spa" and (subtitle.audio_language != "eng" or self.endpoint != os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):\n'
-     '            raise ConfigurationError("Spanish translation requires the configured Arc endpoint and English audio")\n'
+     '            # Name the file so a refused download can be found in the Bazarr log.\n'
+     '            raise ConfigurationError(f"Spanish translation requires the configured Arc endpoint and English audio for {subtitle.video.original_path}")\n'
      '        if subtitle.task == "error":'),
     ('            output_language = "eng"',
      '            output_language = subtitle.language.alpha3'),
@@ -30,6 +32,10 @@ REPLACEMENTS = [
 
 
 def patch(source):
+    if source.endswith("\n" + PREVIOUS_MARKER + "\n"):
+        # Only an in-place container layer can hold the old marker; a recreated
+        # container starts from the pristine image file and takes the patched path.
+        raise RuntimeError("Older Whisper extension found; recreate the Bazarr container to re-apply this hook")
     if source.endswith("\n" + MARKER + "\n"):
         # Reverse only exact changes and re-verify the original, rather than
         # trusting a marker an incompatible or partially patched file could retain.

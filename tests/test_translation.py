@@ -201,10 +201,11 @@ def test_hook_rejects_unknown_and_preserves_idempotence(monkeypatch):
     monkeypatch.setenv("WHISPER_TRANSLATION_ENDPOINT", "http://whisper-arc:9000")
     provider = env["Provider"]()
     provider.endpoint = "http://subgen:9000"
-    sub = SimpleNamespace(task="translate", audio_language="eng")
+    sub = SimpleNamespace(task="translate", audio_language="eng",
+                          video=SimpleNamespace(original_path="/data/media/series/99/Season 01/Show.S01E02.mkv"))
     assert provider.query(SimpleNamespace(alpha3="spa"), sub) is None
     sub.language = SimpleNamespace(alpha3="spa")
-    with pytest.raises(ValueError, match="configured Arc endpoint"):
+    with pytest.raises(ValueError, match="configured Arc endpoint and English audio for /data/media/series/99"):
         provider.download(sub, "en", None, b"pcm")
     provider.endpoint = "http://whisper-arc:9000"
     assert provider.query(SimpleNamespace(alpha3="spa"), sub) is sub

@@ -21,6 +21,11 @@ services:
       - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-}
       # Fall back to the local model if the proxy fails or returns junk.
       - TRANSLATION_LOCAL_FALLBACK=${TRANSLATION_LOCAL_FALLBACK:-true}
+      # Request logs name the media file Bazarr sends as video_file. Extra
+      # requests queue for the single pipeline instead of failing immediately.
+      - WHISPER_LOG_LEVEL=${WHISPER_LOG_LEVEL:-INFO}
+      - WHISPER_GATE_WAIT_SECONDS=${WHISPER_GATE_WAIT_SECONDS:-900}
+      - WHISPER_MAX_WAITERS=${WHISPER_MAX_WAITERS:-4}
     cpus: 2
     mem_limit: 2g
     pids_limit: 256

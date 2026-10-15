@@ -3,12 +3,22 @@
 Bazarr uploads 16 kHz mono s16le PCM with encode=false; no media paths, API
 credentials or host ports are required. One request runs at a time to protect
 arr's 4 GiB LXC. Never fall back to CPU silently when the GPU is unavailable.
+
+Every request logs the media file name Bazarr passes as the `video_file` query
+parameter, so a failing episode can be found by grepping the container logs for
+its file name. Extra requests wait for the single pipeline instead of failing,
+because Bazarr turns a 503 into a failed download (and the provider hook raises
+on non-2xx responses).
 """
 
+import logging
 import os
 import subprocess
+import sys
 import tempfile
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -20,10 +30,66 @@ SAMPLE_RATE = 16000
 WINDOW_SAMPLES = 30 * SAMPLE_RATE
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 MAX_PCM_BYTES = 512 * 1024 * 1024
+# How long a queued request waits for the busy pipeline before answering 503,
+# and how many requests may queue behind it at once.
+GATE_WAIT_SECONDS = max(0.0, float(os.environ.get("WHISPER_GATE_WAIT_SECONDS", "900")))
+MAX_WAITERS = max(0, int(os.environ.get("WHISPER_MAX_WAITERS", "4")))
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 _pipeline = None
-_busy = threading.Lock()
+_gate = threading.Lock()
+_waiters = threading.BoundedSemaphore(MAX_WAITERS)
+
+LOG = logging.getLogger("whisper_arc")
+LOG.setLevel(os.environ.get("WHISPER_LOG_LEVEL", "INFO").upper())
+if not LOG.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s whisper_arc %(message)s"))
+    LOG.addHandler(_handler)
+LOG.propagate = False
+
+
+def source_label(video_file, upload):
+    """Return log-safe `(name, path)` for the media file; never used for IO."""
+    raw = video_file or getattr(upload, "filename", "") or ""
+    raw = "".join(character for character in raw if character.isprintable())[:500]
+    return (Path(raw).name if raw else "unknown")[:200], raw
+
+
+def log_event(event, *, name, path="", **fields):
+    """One greppable line per request transition, keyed by media file name."""
+    parts = [f'file="{name}"']
+    if path and path != name:
+        parts.append(f'path="{path}"')
+    parts.extend(f"{key}={value}" for key, value in fields.items() if value is not None)
+    LOG.info("%s %s", event, " ".join(parts))
+
+
+@contextmanager
+def exclusive():
+    """Run one request at a time, queueing bounded waiters instead of dropping them."""
+    waited = 0.0
+    if not _gate.acquire(blocking=False):
+        if not _waiters.acquire(blocking=False):
+            raise HTTPException(503, "Whisper queue is full", headers={"Retry-After": "30"})
+        try:
+            started = time.monotonic()
+            if not _gate.acquire(timeout=GATE_WAIT_SECONDS):
+                raise HTTPException(503, "Whisper queue wait timed out", headers={"Retry-After": "60"})
+            waited = time.monotonic() - started
+        finally:
+            _waiters.release()
+    try:
+        yield waited
+    finally:
+        _gate.release()
+
+
+def failure_detail(exc):
+    """Bounded HTTP status/detail for logs; never raises or exposes payloads."""
+    if isinstance(exc, HTTPException):
+        return exc.status_code, str(exc.detail)[:200]
+    return 500, type(exc).__name__
 
 
 def pipeline():
@@ -105,6 +171,10 @@ def transcribe(pcm, task, language):
     return "\n".join(lines).encode("utf-8")
 
 
+def cue_count(data):
+    return data.count(b"\n\n") + 1 if data.strip() else 0
+
+
 def detect(pcm):
     samples = np.memmap(pcm, dtype="<i2", mode="r")
     audio = np.asarray(samples[:WINDOW_SAMPLES], dtype=np.float32) / 32768.0
@@ -133,39 +203,69 @@ def health():
 
 
 @app.post("/asr")
-def asr(audio_file: UploadFile = File(...), task: str = "transcribe", language: str = "", output: str = "srt", encode: str = "false", target_language: str = ""):
-    if task not in ("transcribe", "translate") or output != "srt":
-        raise HTTPException(400, "Only transcribe/translate with SRT output is supported")
-    if language and (len(language) != 2 or not language.isalpha()):
-        raise HTTPException(400, "language must be an ISO 639-1 code")
-    if target_language and not (target_language == "es" and language == "en" and task == "translate"):
-        raise HTTPException(400, "Text translation supports English to Spanish only")
-    if not _busy.acquire(blocking=False):
-        raise HTTPException(503, "Whisper is processing another request")
+def asr(audio_file: UploadFile = File(...), task: str = "transcribe", language: str = "", output: str = "srt", encode: str = "false", target_language: str = "", video_file: str = ""):
+    name, path = source_label(video_file, audio_file)
+    started = time.monotonic()
+    log_event("asr start", name=name, path=path, task=task, language=language or "-",
+              target=target_language or "-", encode=encode)
     try:
-        with tempfile.TemporaryDirectory(prefix="whisper-arc-") as directory:
-            # Whisper cannot target Spanish. First transcribe English, then
-            # translate cue text only; keep all generated SRT timings unchanged.
-            data = transcribe(pcm_path(audio_file, encode, directory), "transcribe" if target_language else task, language or "")
-            if target_language:
-                from translation import translate_srt
+        if task not in ("transcribe", "translate") or output != "srt":
+            raise HTTPException(400, "Only transcribe/translate with SRT output is supported")
+        if language and (len(language) != 2 or not language.isalpha()):
+            raise HTTPException(400, "language must be an ISO 639-1 code")
+        if target_language and not (target_language == "es" and language == "en" and task == "translate"):
+            raise HTTPException(400, "Text translation supports English to Spanish only")
+        with exclusive() as waited:
+            if waited:
+                log_event("asr queued", name=name, path=path, waited_seconds=round(waited, 1))
+            with tempfile.TemporaryDirectory(prefix="whisper-arc-") as directory:
+                # Whisper cannot target Spanish. First transcribe English, then
+                # translate cue text only; keep all generated SRT timings unchanged.
+                data = transcribe(pcm_path(audio_file, encode, directory), "transcribe" if target_language else task, language or "")
+                if target_language:
+                    from translation import translate_srt
 
-                try:
-                    data = translate_srt(data)
-                except (RuntimeError, ValueError, OSError) as exc:
-                    raise HTTPException(503, "Local Spanish translation failed; no subtitles returned") from exc
+                    try:
+                        data = translate_srt(data)
+                    except (RuntimeError, ValueError, OSError) as exc:
+                        raise HTTPException(503, "Local Spanish translation failed; no subtitles returned") from exc
+        cues = cue_count(data)
+        log_event("asr ok" if cues else "asr empty", name=name, path=path, cues=cues,
+                  bytes_out=len(data), seconds=round(time.monotonic() - started, 1))
         return Response(data, media_type="application/x-subrip")
-    finally:
-        _busy.release()
+    except HTTPException as exc:
+        log_event("asr failed", name=name, path=path, status=exc.status_code, reason=str(exc.detail)[:200],
+                  seconds=round(time.monotonic() - started, 1))
+        raise
+    except Exception as exc:
+        LOG.exception("asr error file=\"%s\" path=\"%s\"", name, path)
+        status, reason = failure_detail(exc)
+        log_event("asr failed", name=name, path=path, status=status, reason=reason,
+                  seconds=round(time.monotonic() - started, 1))
+        raise
 
 
 @app.post("/detect-language")
-def detect_language(audio_file: UploadFile = File(...), encode: str = "false"):
-    if not _busy.acquire(blocking=False):
-        raise HTTPException(503, "Whisper is processing another request")
+def detect_language(audio_file: UploadFile = File(...), encode: str = "false", video_file: str = ""):
+    name, path = source_label(video_file, audio_file)
+    started = time.monotonic()
+    log_event("detect start", name=name, path=path, encode=encode)
     try:
-        with tempfile.TemporaryDirectory(prefix="whisper-arc-") as directory:
-            result = detect(pcm_path(audio_file, encode, directory))
+        with exclusive() as waited:
+            if waited:
+                log_event("detect queued", name=name, path=path, waited_seconds=round(waited, 1))
+            with tempfile.TemporaryDirectory(prefix="whisper-arc-") as directory:
+                result = detect(pcm_path(audio_file, encode, directory))
+        log_event("detect ok", name=name, path=path, language=result["language_code"],
+                  seconds=round(time.monotonic() - started, 1))
         return JSONResponse(result)
-    finally:
-        _busy.release()
+    except HTTPException as exc:
+        log_event("detect failed", name=name, path=path, status=exc.status_code, reason=str(exc.detail)[:200],
+                  seconds=round(time.monotonic() - started, 1))
+        raise
+    except Exception as exc:
+        LOG.exception("detect error file=\"%s\" path=\"%s\"", name, path)
+        status, reason = failure_detail(exc)
+        log_event("detect failed", name=name, path=path, status=status, reason=reason,
+                  seconds=round(time.monotonic() - started, 1))
+        raise

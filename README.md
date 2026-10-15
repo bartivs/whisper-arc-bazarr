@@ -44,7 +44,7 @@ No port is published. Use `docker exec` or another container on the same network
 
 ## Bazarr: transcription and native Whisper translation
 
-Settings → Providers → enable **Whisper**, endpoint **`http://whisper-arc:9000`**. Keep connection timeout 5s; start with read timeout 3600s. Turn off “Pass video filename”: audio is uploaded, and paths are neither required nor read.
+Settings → Providers → enable **Whisper**, endpoint **`http://whisper-arc:9000`**. Keep connection timeout 5s; set the read timeout above the queue wait plus one transcription (3600s is a safe start). Turn on “Pass video filename”: the path is still never read or followed, but it is logged, which is what makes a failing episode findable (see [Diagnosing failed downloads](#diagnosing-failed-downloads)).
 
 Select your language profile and use **Manual Search** on one episode. Whisper supports same-language transcription and native translation **into English**. Without the extension below, Bazarr does not list English-to-Spanish translations. Exclude `whisperai` from automatic audio sync. For automatic downloads, note Whisper's low fixed scores (220/360 episodes, 60/180 movies); lowering global scores can admit bad matches from other providers.
 
@@ -129,7 +129,46 @@ curl -f -F audio_file=@clip.pcm \
   'http://whisper-arc:9000/detect-language?encode=false'
 ```
 
-Omitting `target_language` preserves native Whisper behavior. Spanish targets require `language=en&task=translate`; unsupported pairs return 400. Translation errors return 503, never English mislabeled as Spanish. An active request rejects concurrent work with 503; do not enable bulk parallel searches.
+Omitting `target_language` preserves native Whisper behavior. Spanish targets require `language=en&task=translate`; unsupported pairs return 400. Translation errors return 503, never English mislabeled as Spanish. Concurrent requests wait for the single pipeline and then run in order (see [Diagnosing failed downloads](#diagnosing-failed-downloads)); they only fail with 503 + `Retry-After` after the queue wait expires or the bounded queue is full.
+
+## Diagnosing failed downloads
+
+Every request logs one greppable line naming the media file Bazarr passed as `video_file`, plus the task, language, duration and result. `path` is only echoed from Bazarr; the service still never opens a media path.
+
+```bash
+docker logs whisper-arc 2>&1 | tail -50              # recent requests
+docker logs whisper-arc 2>&1 | grep 'Show.S01E03'    # one episode by file name
+docker logs whisper-arc 2>&1 | grep 'asr failed'     # every failed request
+docker logs whisper-arc 2>&1 | grep 'asr empty'      # transcriptions with no cues
+docker logs whisper-arc 2>&1 | grep 'queued'         # requests that had to wait
+```
+
+Sample lines (one per state):
+
+```text
+asr start file="Show.S01E03.mkv" path="/data/media/series/99/Season 01/Show.S01E03.mkv" task=translate language=en target=es encode=false
+asr queued file="Show.S01E03.mkv" path="..." waited_seconds=41.2
+asr ok file="Show.S01E03.mkv" path="..." cues=812 bytes_out=41234 seconds=97.4
+asr empty file="Show.S01E05.mkv" path="..." cues=0 bytes_out=0 seconds=63.1
+asr failed file="Show.S01E04.mkv" path="..." status=503 reason=Whisper queue wait timed out seconds=900.0
+detect ok file="Show.S01E06.mkv" path="..." language=en seconds=1.2
+```
+
+How to read the result:
+
+- `asr failed`/`detect failed` carry the exact HTTP status and reason, so a `503` is a queue/timeout problem while `400`/`413` is malformed or oversized input.
+- `asr empty` means the audio produced no cues (silence, music or an all-speech-off episode); Bazarr receives a successful but empty subtitle.
+- **No line at all for an episode** means Bazarr never called this service. Check the Bazarr log for the same file name: the provider refuses before the upload when the requested language is not English/→Spanish (the hook now includes the full path in that message), or when the audio track has no usable language and detection fails.
+
+Tuning (all optional, defaults shown):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WHISPER_LOG_LEVEL` | `INFO` | `DEBUG` also logs Bazarr-facing details; `WARNING` silences request lines |
+| `WHISPER_GATE_WAIT_SECONDS` | `900` | How long a queued request waits for the busy pipeline before returning 503 |
+| `WHISPER_MAX_WAITERS` | `4` | Requests allowed to queue; beyond it the answer is 503 + `Retry-After: 30` |
+
+Keep `WHISPER_GATE_WAIT_SECONDS` below Bazarr's provider read timeout, otherwise Bazarr gives up before the queue does.
 
 ## Tests
 
@@ -150,7 +189,7 @@ Unit/API tests use fake inference so they run without GPU or model weights. They
 - Translation is batched per cue group, not whole-film context; quality and line-length conventions are not guaranteed. Review samples before bulk use.
 - With the proxy engine enabled, subtitle **text** is sent to the configured provider (e.g. OpenRouter) and is subject to that provider's retention policy. Audio never leaves the host. Disable by clearing `TRANSLATION_API_KEY` to stay fully offline.
 - English → standard Spanish only in the text layer. Other requested targets fail explicitly.
-- One inference request at a time, 2 CPU / 2 GiB cap in Compose. First GPU initialization is slower. The adapter retains its models in memory.
+- One inference request at a time, 2 CPU / 2 GiB cap in Compose. Extra requests queue in order (bounded by `WHISPER_GATE_WAIT_SECONDS`/`WHISPER_MAX_WAITERS`) instead of failing immediately, so parallel Bazarr searches serialize. First GPU initialization is slower. The adapter retains its models in memory.
 - The unauthenticated API belongs on a trusted private Docker network. Do not expose it publicly. Uploads over 512 MiB are rejected by application logic after multipart parsing; use a reverse proxy body-size limit if accepting untrusted clients.
 - Uploaded audio uses temporary disk files (removed after each request); no media paths are followed and no subtitles are written into your library by the service. Bazarr performs the final save.
 
