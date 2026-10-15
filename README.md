@@ -6,7 +6,9 @@ Local, Bazarr-compatible AI subtitles using **Intel Arc + OpenVINO Whisper**, wi
 - `/detect-language`: Bazarr-compatible `language_code` and `detected_language` JSON.
 - `/status`: version for Bazarr's Test Connection button; `/health`: GPU/model availability.
 - Whisper base runs on **GPU explicitly**, never silently on CPU.
-- Spanish text translation uses local OPUS-MT/CTranslate2 **int8 on CPU**, preserving cue numbering and timestamps.
+- Spanish text translation preserves cue numbering and timestamps, and runs on either:
+  - an OpenAI-compatible **LiteLLM proxy** (primary; the fleet proxy on `openweb-ui`), or
+  - the bundled **OPUS-MT/CTranslate2 int8** local model, used automatically when the proxy is missing or fails.
 
 Tested on an **Intel Arc A380**, including Docker inside Proxmox LXC. The host must expose `/dev/dri` and the LXC must already have permission to access it. This project does not change Proxmox/BIOS settings or install host GPU drivers.
 
@@ -75,6 +77,47 @@ In Bazarr keep the Whisper endpoint above, select a **Spanish** language profile
 
 To roll back: remove both hook mounts and `WHISPER_TRANSLATION_ENDPOINT` and recreate Bazarr from its image. Switch endpoint to your previous ASR/Subgen service for CPU fallback (that fallback cannot translate English → Spanish).
 
+## Translation engine: LiteLLM proxy (recommended) or local model
+
+Spanish cue text is translated by the first engine that is configured and healthy:
+
+1. **LiteLLM / OpenAI-compatible endpoint** (`TRANSLATION_ENDPOINT` + `TRANSLATION_API_KEY`).
+2. **Bundled local model** (automatic fallback, or the only engine when no endpoint/key is set).
+
+Only the translation text ever leaves the host, and only when the proxy path is used: your **audio never leaves** the machine, and neither do cue numbers or timestamps. Set an empty `TRANSLATION_API_KEY` for a fully offline deployment.
+
+Point it at any OpenAI-compatible `/chat/completions` endpoint:
+
+```bash
+TRANSLATION_ENDPOINT=http://192.168.1.109:4000/v1   # e.g. a LiteLLM proxy
+TRANSLATION_MODEL=subtitle-translate                # proxy model alias
+TRANSLATION_API_KEY=sk-...                          # scoped virtual key, not a master key
+TRANSLATION_LOCAL_FALLBACK=true                     # degrade to the local model on failure
+```
+
+To use a **separate LiteLLM instance** (no Docker network needed), add a model alias to its `model_list` and request it by that alias:
+
+```yaml
+  - model_name: subtitle-translate
+    litellm_params:
+      model: openrouter/google/gemini-3.1-flash-lite
+      api_key: os.environ/OPENROUTER_API_KEY
+```
+
+**Model choice.** An independent 1,002-segment subtitle benchmark across six target languages ranked a Gemini Flash Lite lane second overall and best on quality-to-cost, and found English→Spanish mature with small gaps between models — so the cheap lane is the right pick for this direction. Cost is roughly **$0.02 per feature film** at current OpenRouter pricing (~10k input + ~12k output tokens). Because the model lives behind a proxy alias, changing it needs no change on the Whisper host.
+
+**Use a scoped key.** The adapter only needs one model. Mint a LiteLLM virtual key limited to that alias instead of copying the master key:
+
+```bash
+curl -sS -X POST http://<litellm>:4000/key/generate \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H 'Content-Type: application/json' \
+  -d '{"key_alias":"whisper-arc-translate","models":["subtitle-translate"]}'
+```
+
+The returned `sk-...` value is the `TRANSLATION_API_KEY`. Rotate by deleting the old key (`/key/delete`) and repeating. Note the key is sent over plain HTTP unless your endpoint terminates TLS, so keep it on a trusted network.
+
+**Reliability.** Each batch is a numbered JSON request, and a reply is accepted only when it has exactly one non-empty translation per requested cue index; otherwise it is retried once and then handed to the local model. Reordered replies are re-ordered by index rather than discarded. Translation failures never yield English subtitles labelled as Spanish.
+
 ## API smoke test
 
 From a container on Bazarr's network, given a short PCM test clip:
@@ -104,7 +147,8 @@ Unit/API tests use fake inference so they run without GPU or model weights. They
 
 - Experimental: manually inspect subtitles before using across a library.
 - Whisper `base` is fast but less accurate than larger models; hallucinations and speech split at 30-second window boundaries are possible.
-- Translation is one cue at a time (batched for throughput), not whole-film contextual translation. No LLM/idiom-quality guarantee.
+- Translation is batched per cue group, not whole-film context; quality and line-length conventions are not guaranteed. Review samples before bulk use.
+- With the proxy engine enabled, subtitle **text** is sent to the configured provider (e.g. OpenRouter) and is subject to that provider's retention policy. Audio never leaves the host. Disable by clearing `TRANSLATION_API_KEY` to stay fully offline.
 - English → standard Spanish only in the text layer. Other requested targets fail explicitly.
 - One inference request at a time, 2 CPU / 2 GiB cap in Compose. First GPU initialization is slower. The adapter retains its models in memory.
 - The unauthenticated API belongs on a trusted private Docker network. Do not expose it publicly. Uploads over 512 MiB are rejected by application logic after multipart parsing; use a reverse proxy body-size limit if accepting untrusted clients.
@@ -120,5 +164,6 @@ Adapter and hook code: MIT (see LICENSE). No Bazarr source or model weights are 
 - [CTranslate2](https://github.com/OpenNMT/CTranslate2) and [SentencePiece](https://github.com/google/sentencepiece).
 - Pinned Intel runtime base from [Whisper Pro ASR](https://github.com/ventura8/Whisper-Pro-ASR); upstream application is bypassed, its container/dependency licenses still apply.
 - [Bazarr](https://github.com/morpheus65535/bazarr) and [LinuxServer Bazarr container](https://docs.linuxserver.io/images/docker-bazarr/); runtime extension patches operator-installed code. Not affiliated with those projects.
+- Translation via a [LiteLLM](https://github.com/BerriAI/litellm) proxy and OpenRouter is **optional** and not bundled. Model choice, availability and pricing belong to those services.
 
 Ansible integration: [bartivs/homelab-infra](https://github.com/bartivs/homelab-infra), role `media-stack`.

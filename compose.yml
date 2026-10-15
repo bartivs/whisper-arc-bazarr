@@ -12,6 +12,15 @@ services:
     volumes:
       - ./models/whisper:/models:ro
       - ./models/translation:/translation-model:ro
+    environment:
+      # Optional translation engine: any OpenAI-compatible endpoint (the fleet
+      # LiteLLM proxy is what this project is tested against). Leave the key
+      # empty to translate fully offline with the bundled local model.
+      - TRANSLATION_ENDPOINT=${TRANSLATION_ENDPOINT:-}
+      - TRANSLATION_MODEL=${TRANSLATION_MODEL:-subtitle-translate}
+      - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-}
+      # Fall back to the local model if the proxy fails or returns junk.
+      - TRANSLATION_LOCAL_FALLBACK=${TRANSLATION_LOCAL_FALLBACK:-true}
     cpus: 2
     mem_limit: 2g
     pids_limit: 256
