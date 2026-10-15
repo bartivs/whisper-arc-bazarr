@@ -1,0 +1,29 @@
+# Join Bazarr's existing network. No host ports, secrets or media mounts.
+services:
+  whisper-arc:
+    build: .
+    image: whisper-arc-bazarr:local
+    container_name: whisper-arc
+    user: "65534:65534"
+    group_add:
+      - "${RENDER_GID:?Set RENDER_GID to the host render device numeric group}"
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./models/whisper:/models:ro
+      - ./models/translation:/translation-model:ro
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 256
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      start_period: 30s
+    networks:
+      - bazarr
+networks:
+  bazarr:
+    external: true
+    name: "${BAZARR_NETWORK:-servarrnetwork}"
