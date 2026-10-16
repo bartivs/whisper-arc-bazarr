@@ -33,12 +33,12 @@ def test_bad_locale_rejected(value):
 def test_posix_api_language_and_target_are_normalized(monkeypatch):
     model = FakePipeline()
     monkeypatch.setattr(arc, "pipeline", lambda: model)
-    monkeypatch.setattr(translation, "translate_texts", lambda texts: ["Hola" for _ in texts])
+    monkeypatch.setattr(translation, "translate_texts", lambda texts, source_code="en": ["Hola" for _ in texts])
     response = client.post("/asr", params={"language": "en_US.UTF-8", "task": "translate", "target_language": "es_MX.UTF-8"},
                            files={"audio_file": ("test.pcm", b"\0\0" * 16000)})
     assert response.status_code == 200
     assert "Hola" in response.text
-    assert model.calls[0][1]["language"] == "<|en|>"
+    assert model.calls[-1][1]["language"] == "<|en|>"
     assert client.get("/status").json()["target_locale"] == "es_MX.UTF-8"
     response = client.post("/asr?language=en&task=translate&target_language=es_ES.UTF-8",
                            files={"audio_file": ("test.pcm", b"\0\0" * 16000)})

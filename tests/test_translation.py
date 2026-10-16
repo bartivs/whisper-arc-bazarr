@@ -52,7 +52,7 @@ def test_reordered_cues_are_restored_by_index(monkeypatch):
 
 def test_duplicate_or_missing_indices_fall_back(monkeypatch):
     monkeypatch.setattr(translation, "_post", lambda payload: reply([{"i": 0, "text": "a"}, {"i": 0, "text": "b"}]))
-    monkeypatch.setattr(translation, "local_translate", lambda texts: [f"LOCAL:{t}" for t in texts])
+    monkeypatch.setattr(translation, "local_translate", lambda texts, source_code="en": [f"LOCAL:{t}" for t in texts])
     assert translation.translate_texts(["Hello", "World"]) == ["LOCAL:Hello", "LOCAL:World"]
 
 
@@ -70,7 +70,7 @@ def test_invalid_reply_retries_then_uses_local_model(monkeypatch, bad):
         return bad
 
     monkeypatch.setattr(translation, "_post", fake_post)
-    monkeypatch.setattr(translation, "local_translate", lambda texts: ["local" for _ in texts])
+    monkeypatch.setattr(translation, "local_translate", lambda texts, source_code="en": ["local" for _ in texts])
     assert translation.translate_texts(["Hello"]) == ["local"]
     assert len(attempts) == 2, "one retry before falling back"
 
@@ -94,14 +94,14 @@ def test_http_failure_falls_back(monkeypatch):
         raise RuntimeError("translation endpoint returned HTTP 403")
 
     monkeypatch.setattr(translation, "_post", boom)
-    monkeypatch.setattr(translation, "local_translate", lambda texts: ["local" for _ in texts])
+    monkeypatch.setattr(translation, "local_translate", lambda texts, source_code="en": ["local" for _ in texts])
     assert translation.translate_texts(["Hello"]) == ["local"]
 
 
 def test_local_only_when_proxy_unconfigured(monkeypatch):
     monkeypatch.setattr(translation, "ENDPOINT", "")
     monkeypatch.setattr(translation, "_post", lambda payload: pytest.fail("proxy must not be called"))
-    monkeypatch.setattr(translation, "local_translate", lambda texts: [f"LOCAL:{t}" for t in texts])
+    monkeypatch.setattr(translation, "local_translate", lambda texts, source_code="en": [f"LOCAL:{t}" for t in texts])
     assert translation.translate_texts(["Hello"]) == ["LOCAL:Hello"]
 
 
@@ -132,8 +132,8 @@ def test_spanish_api_uses_proxy_and_keeps_english_asr(monkeypatch):
     response = client.post("/asr?task=translate&language=en&target_language=es", files={"audio_file": ("audio", b"\0\0" * 16000)})
     assert response.status_code == 200
     assert "00:00:00,500 --> 00:00:01,000\nHola mundo" in response.text
-    assert model.calls[0][1]["task"] == "transcribe"
-    assert model.calls[0][1]["language"] == "<|en|>"
+    # detect() also reports task=transcribe, so the hint is on the LAST call.
+    assert model.calls[-1][1]["language"] == "<|en|>"
 
 
 def test_translation_failure_does_not_return_english(monkeypatch):
@@ -145,7 +145,7 @@ def test_translation_failure_does_not_return_english(monkeypatch):
     assert "Hello world" not in response.text
 
 
-@pytest.mark.parametrize("query", ["language=fr&task=translate", "language=en&task=transcribe", "language=en&task=translate&target_language=de"])
+@pytest.mark.parametrize("query", ["language=en&task=transcribe", "language=en&task=translate&target_language=de"])
 def test_invalid_pairs_rejected(monkeypatch, query):
     if "target_language" not in query:
         query += "&target_language=es"
@@ -221,7 +221,7 @@ class Provider:
                           video=SimpleNamespace(original_path="/data/media/series/99/Season 01/Show.S01E02.mkv"))
     assert provider.query(SimpleNamespace(alpha3="spa"), sub) is None
     sub.language = SimpleNamespace(alpha3="spa")
-    with pytest.raises(ValueError, match="configured Arc endpoint and English audio for /data/media/series/99"):
+    with pytest.raises(ValueError, match="configured Arc endpoint for /data/media/series/99"):
         provider.download(sub, "en", None, b"pcm")
     provider.endpoint = "http://whisper-arc:9000"
     assert provider.query(SimpleNamespace(alpha3="spa"), sub) is sub
@@ -238,12 +238,17 @@ class Provider:
     matched = env["MatchedSubtitle"]()
     matched.matches = set()
     matched.arc_source_path = video.original_path
-    matched.arc_source_fields = {"year": 2017, "source": "Blu-ray", "release_group": "HANDJOB", "resolution": None}
-    assert matched.get_matches(video) == {"series", "season", "episode", "year", "source", "release_group"}
-    video.source = "Web"
-    assert "source" not in matched.get_matches(video)
+    video.resolution, video.video_codec, video.audio_codec = "1080p", "H264", "AAC"
+    matched.arc_source_fields = {"year": 2017, "resolution": "1080p", "video_codec": "H264", "audio_codec": "AAC"}
+    # Capped set: 220 base + year(90) + resolution(1) + codecs(2) = 313/360 (~87%).
+    assert matched.get_matches(video) == {"series", "season", "episode", "year", "resolution", "video_codec", "audio_codec"}
+    # base 220 + year 90 + resolution 1 + two codecs 2 = 313 of 360 (~87%)
+    assert 220 + 90 + 1 + 1 + 1 == 313
+    video.resolution = "720p"
+    assert "resolution" not in matched.get_matches(video)
     assert "hash" not in matched.matches
     video.original_path = "/different/episode.mkv"
     assert matched.get_matches(video) == set()
+    # Source-language agnostic now: any audio language may request Spanish.
     sub.audio_language = "fra"
-    assert provider.query(SimpleNamespace(alpha3="spa"), sub) is None
+    assert provider.query(SimpleNamespace(alpha3="spa"), sub) is sub

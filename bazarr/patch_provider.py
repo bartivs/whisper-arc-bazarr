@@ -11,15 +11,17 @@ import sys
 from pathlib import Path
 
 UPSTREAM_SHA256 = "257c450de9c0e2fa86a30582f9b8b4446756b197755c2c354a9ed604bdc92ed7"  # pragma: allowlist secret (public source checksum)
-MARKER = "# whisper-arc-bazarr Spanish provider extension v3"
-PREVIOUS_MARKERS = ("# whisper-arc-bazarr Spanish provider extension v1", "# whisper-arc-bazarr Spanish provider extension v2")
+MARKER = "# whisper-arc-bazarr Spanish provider extension v4"
+PREVIOUS_MARKERS = tuple(f"# whisper-arc-bazarr Spanish provider extension v{n}" for n in (1, 2, 3))
 REPLACEMENTS = [
     ('            if language.alpha3 != "eng":',
-     '            if language.alpha3 != "eng" and not (language.alpha3 == "spa" and sub.audio_language == "eng" and self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):'),
+     # Source-language agnostic: the Arc adapter resolves the source language itself
+     # (tag / acoustic / lexical vote), so Spanish is offerable for a German dub too.
+     '            if language.alpha3 != "eng" and not (language.alpha3 == "spa" and self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):'),
     ('        if subtitle.task == "error":',
-     '        if subtitle.task == "translate" and subtitle.language.alpha3 == "spa" and (subtitle.audio_language != "eng" or self.endpoint != os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):\n'
+     '        if subtitle.task == "translate" and subtitle.language.alpha3 == "spa" and self.endpoint != os.environ.get("WHISPER_TRANSLATION_ENDPOINT"):\n'
      '            # Name the file so a refused download can be found in the Bazarr log.\n'
-     '            raise ConfigurationError(f"Spanish translation requires the configured Arc endpoint and English audio for {subtitle.video.original_path}")\n'
+     '            raise ConfigurationError(f"Spanish translation requires the configured Arc endpoint for {subtitle.video.original_path}")\n'
      '        if subtitle.task == "error":'),
     ('            output_language = "eng"',
      '            output_language = subtitle.language.alpha3'),
@@ -47,7 +49,9 @@ REPLACEMENTS = [
             self.matches.update(["title"])
         if bound is not None:
             # Generated from this exact input, not inferred from an external release.
-            # Only populated, equal fields qualify. Never fabricate hash or HI matches.
+            # Capped on purpose: these fields total 313/360 (~87%), below the ~90% a
+            # real provider usually scores, so a genuine download always outranks a
+            # generated subtitle. Deliberately not a quality claim.
             self.matches.update(key for key, value in self.arc_source_fields.items()
                                 if value is not None and value != "" and value == getattr(video, key, None))
         return self.matches
@@ -56,7 +60,7 @@ REPLACEMENTS = [
      '        if self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT"):\n'
      '            sub.arc_source_path = os.path.normpath(video.original_path)\n'
      '            sub.arc_source_fields = {key: getattr(video, key, None) for key in\n'
-     '                ("year", "source", "release_group", "resolution", "video_codec", "audio_codec", "streaming_service", "edition")}\n'
+     '                ("year", "resolution", "video_codec", "audio_codec")}\n'
      "        sub.release_info = f'{os.path.basename(video.original_path) + \" | \" if getattr(sub, \"arc_source_path\", None) else \"\"}{sub.task}"),
     ('            video_name = path if self.pass_video_name else None',
      '            video_name = path if self.pass_video_name or self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT") else None'),

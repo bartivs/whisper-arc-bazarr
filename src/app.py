@@ -13,6 +13,7 @@ on non-2xx responses).
 
 import json
 import logging
+import re
 import os
 import subprocess
 import sys
@@ -24,7 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
-from languages import SOURCE_LOCALE, TARGET_LOCALE, parse_locale
+from languages import SOURCE_LOCALE, TARGET_LOCALE, parse_locale, resolve_source
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 
@@ -52,6 +53,24 @@ if not LOG.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s whisper_arc %(message)s"))
     LOG.addHandler(_handler)
 LOG.propagate = False
+
+
+_FILENAME_LANGUAGES = {
+    "german": "de", "deutsch": "de", "ger": "de", "deu": "de",
+    "english": "en", "eng": "en",
+    "spanish": "es", "espanol": "es", "spa": "es",
+    "french": "fr", "fre": "fr", "fra": "fr",
+    "italian": "it", "ita": "it", "portuguese": "pt", "por": "pt",
+    "dutch": "nl", "nld": "nl", "russian": "ru", "rus": "ru",
+}
+
+
+def language_hint(text):
+    """Container/file-name language hint only; the supplied path is never opened."""
+    for token in re.split(r"[^a-z]+", (text or "").lower()):
+        if token in _FILENAME_LANGUAGES:
+            return _FILENAME_LANGUAGES[token]
+    return ""
 
 
 def source_label(video_file, upload):
@@ -240,21 +259,39 @@ def asr(audio_file: UploadFile = File(...), task: str = "transcribe", language: 
             raise HTTPException(400, "Only transcribe/translate with SRT output is supported")
         if language and (len(language) != 2 or not language.isalpha()):
             raise HTTPException(400, "language must be an ISO 639-1 code")
-        if target_language and not (target_language == "es" and language == "en" and task == "translate"):
-            raise HTTPException(400, "Text translation supports English to Spanish only")
+        if target_language and (target_language != "es" or task != "translate"):
+            raise HTTPException(400, "Text translation targets Spanish with task=translate only")
         with exclusive() as waited:
             if waited:
                 log_event("asr queued", name=name, path=path, waited_seconds=round(waited, 1))
             with tempfile.TemporaryDirectory(prefix="whisper-arc-") as directory:
                 # Whisper cannot target Spanish. First transcribe English, then
                 # translate cue text only; keep all generated SRT timings unchanged.
-                data = transcribe(pcm_path(audio_file, encode, directory), "transcribe" if target_language else task, language or "")
-                log_event("asr transcribed", name=name, cues=cue_count(data))
+                pcm = pcm_path(audio_file, encode, directory)
+                source = language or ""
+                acoustic = ""
+                if target_language:
+                    # Any source language is allowed: the file may be a German
+                    # dub, so resolve the source instead of assuming English.
+                    acoustic = detect(pcm)["language_code"]
+                    source, evidence = resolve_source(
+                        container_tag=language_hint(name), whisper_code=acoustic, fallback="en")
+                    log_event("language resolved", name=name, source_lang=source,
+                              acoustic=acoustic or "-", evidence=evidence)
+                data = transcribe(pcm, "transcribe" if target_language else task, source)
+                log_event("asr transcribed", name=name, cues=cue_count(data), source_lang=source or "auto")
                 if target_language:
                     from translation import translate_srt
 
                     try:
-                        data = translate_srt(data, media_name=name)
+                        # Cross-check the transcript itself; a lexical win means the
+                        # acoustic guess and the stored tag were both wrong.
+                        source, evidence = resolve_source(
+                            container_tag=language_hint(name), whisper_code=acoustic,
+                            text=data.decode("utf-8", "ignore"),
+                            fallback=source or "en")
+                        data = translate_srt(data, media_name=name, source_code=source)
+                        log_event("translation ok", name=name, source_lang=source, evidence=evidence)
                     except (RuntimeError, ValueError, OSError) as exc:
                         log_event("translation failed", name=name, reason=type(exc).__name__)
                         raise HTTPException(503, "Spanish translation failed; no subtitles returned") from exc
