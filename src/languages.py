@@ -10,8 +10,9 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-_PATTERN = re.compile(r"^([a-zA-Z]{2})(?:[_-]([a-zA-Z]{2}))?(?:\.(?:UTF-?8|utf-?8))?$")
-_REGIONS = {"MX": "Mexico", "ES": "Spain", "AR": "Argentina", "US": "United States", "GB": "United Kingdom"}
+_PATTERN = re.compile(r"^([a-zA-Z]{2})(?:[_-]([a-zA-Z0-9]{2,3}))?(?:\.(?:UTF-?8|utf-?8))?$")
+_REGIONS = {"MX": "Mexico", "ES": "Spain", "AR": "Argentina", "US": "United States",
+            "GB": "United Kingdom", "419": "Latin America"}
 _LANGUAGE_NAMES = {"en": "English", "de": "German", "es": "Spanish", "fr": "French",
                    "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ru": "Russian"}
 # Whisper/ISO 639-1 codes that are too coarse to translate from.
@@ -50,7 +51,7 @@ def parse_locale(value):
         raise ValueError("Use a supported language code or Unix locale, e.g. es_MX.UTF-8")
     language, region = match.groups()
     language, region = language.lower(), (region or "").upper()
-    allowed = {"en": {"", "US", "GB"}, "es": {"", "MX", "ES", "AR", "US"}}
+    allowed = {"en": {"", "US", "GB"}, "es": {"", "419", "MX", "ES", "AR", "US"}}
     if language not in allowed or region not in allowed[language]:
         raise ValueError("Unsupported language/region combination")
     return Locale(language, region)

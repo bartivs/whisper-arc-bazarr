@@ -13,6 +13,8 @@ from languages import parse_locale
 
 @pytest.mark.parametrize("value,unix,label", [
     ("es_MX.UTF-8", "es_MX.UTF-8", "Spanish (Mexico)"),
+    ("es_419.UTF-8", "es_419.UTF-8", "Spanish (Latin America)"),
+    ("es-419", "es_419.UTF-8", "Spanish (Latin America)"),
     ("es-MX", "es_MX.UTF-8", "Spanish (Mexico)"),
     ("es_es.utf8", "es_ES.UTF-8", "Spanish (Spain)"),
     ("en_US", "en_US.UTF-8", "English (United States)"),
