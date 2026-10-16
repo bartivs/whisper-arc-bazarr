@@ -238,14 +238,14 @@ class Provider:
     matched = env["MatchedSubtitle"]()
     matched.matches = set()
     matched.arc_source_path = video.original_path
-    video.resolution, video.video_codec, video.audio_codec = "1080p", "H264", "AAC"
-    matched.arc_source_fields = {"year": 2017, "resolution": "1080p", "video_codec": "H264", "audio_codec": "AAC"}
-    # Capped set: 220 base + year(90) + resolution(1) + codecs(2) = 313/360 (~87%).
-    assert matched.get_matches(video) == {"series", "season", "episode", "year", "resolution", "video_codec", "audio_codec"}
-    # base 220 + year 90 + resolution 1 + two codecs 2 = 313 of 360 (~87%)
-    assert 220 + 90 + 1 + 1 + 1 == 313
-    video.resolution = "720p"
-    assert "resolution" not in matched.get_matches(video)
+    video.release_group = "HANDJOB"
+    matched.arc_source_fields = {"year": 2017, "release_group": "HANDJOB"}
+    # Capped set: base 220 + year 90 + release_group 20 = 330/360 (92%):
+    # above Bazarr's minimum_score (90) but below a real release's ~93%.
+    assert matched.get_matches(video) == {"series", "season", "episode", "year", "release_group"}
+    assert 220 + 90 + 20 == 330
+    video.release_group = "OTHERGROUP"
+    assert "release_group" not in matched.get_matches(video)
     assert "hash" not in matched.matches
     video.original_path = "/different/episode.mkv"
     assert matched.get_matches(video) == set()

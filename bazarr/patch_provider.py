@@ -49,9 +49,11 @@ REPLACEMENTS = [
             self.matches.update(["title"])
         if bound is not None:
             # Generated from this exact input, not inferred from an external release.
-            # Capped on purpose: these fields total 313/360 (~87%), below the ~90% a
-            # real provider usually scores, so a genuine download always outranks a
-            # generated subtitle. Deliberately not a quality claim.
+            # Capped on purpose: 220 base + year(90) + release_group(20) = 330/360
+            # (92%). That clears Bazarr's minimum_score (90) so a generated subtitle
+            # is still downloaded when nothing better exists, yet stays below the
+            # ~93% a real release usually scores, so a genuine download is picked
+            # first. This is a matching score, not a quality claim.
             self.matches.update(key for key, value in self.arc_source_fields.items()
                                 if value is not None and value != "" and value == getattr(video, key, None))
         return self.matches
@@ -60,7 +62,7 @@ REPLACEMENTS = [
      '        if self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT"):\n'
      '            sub.arc_source_path = os.path.normpath(video.original_path)\n'
      '            sub.arc_source_fields = {key: getattr(video, key, None) for key in\n'
-     '                ("year", "resolution", "video_codec", "audio_codec")}\n'
+     '                ("year", "release_group")}\n'
      "        sub.release_info = f'{os.path.basename(video.original_path) + \" | \" if getattr(sub, \"arc_source_path\", None) else \"\"}{sub.task}"),
     ('            video_name = path if self.pass_video_name else None',
      '            video_name = path if self.pass_video_name or self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT") else None'),
