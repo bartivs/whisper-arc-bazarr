@@ -145,7 +145,7 @@ def test_translation_failure_does_not_return_english(monkeypatch):
     assert "Hello world" not in response.text
 
 
-@pytest.mark.parametrize("query", ["language=en&task=transcribe", "language=en&task=translate&target_language=de"])
+@pytest.mark.parametrize("query", ["language=en&task=transcribe", "language=en&task=translate&target_language=xx"])
 def test_invalid_pairs_rejected(monkeypatch, query):
     if "target_language" not in query:
         query += "&target_language=es"
@@ -212,20 +212,23 @@ class Provider:
     with pytest.raises(RuntimeError):
         module.patch(patched.replace("return sub", "return None"))
     from types import SimpleNamespace
-    env = {"os": __import__("os"), "ConfigurationError": ValueError}
+    codes = {"eng": "en", "spa": "es", "fra": "fr", "deu": "de", "jpn": "ja", "por": "pt", "haw": "haw"}
+    env = {"os": __import__("os"), "ConfigurationError": ValueError,
+           "wlm": SimpleNamespace(alpha3_to_alpha2=codes.get)}
     exec(patched, env)
     monkeypatch.setenv("WHISPER_TRANSLATION_ENDPOINT", "http://whisper-arc:9000")
     provider = env["Provider"]()
     provider.endpoint = "http://subgen:9000"
     sub = SimpleNamespace(task="translate", audio_language="eng",
                           video=SimpleNamespace(original_path="/data/media/series/99/Season 01/Show.S01E02.mkv"))
-    assert provider.query(SimpleNamespace(alpha3="spa"), sub) is None
-    sub.language = SimpleNamespace(alpha3="spa")
+    assert provider.query(SimpleNamespace(alpha3="spa", alpha2="es"), sub) is None
+    sub.language = SimpleNamespace(alpha3="spa", alpha2="es")
     with pytest.raises(ValueError, match="configured Arc endpoint for /data/media/series/99"):
         provider.download(sub, "en", None, b"pcm")
     provider.endpoint = "http://whisper-arc:9000"
-    assert provider.query(SimpleNamespace(alpha3="spa"), sub) is sub
+    assert provider.query(SimpleNamespace(alpha3="spa", alpha2="es"), sub) is sub
     assert "Show.S01E02.mkv" in sub.release_info
+    assert provider.query(SimpleNamespace(alpha3="haw"), sub) is None
     # Metadata boosts are based on the exact input path and known equal fields.
     class Episode:
         pass
@@ -249,6 +252,35 @@ class Provider:
     assert "hash" not in matched.matches
     video.original_path = "/different/episode.mkv"
     assert matched.get_matches(video) == set()
-    # Source-language agnostic now: any audio language may request Spanish.
+    # Source and target languages are independent; forwarding preserves each target.
+    requests = []
+    response = SimpleNamespace(content=b"translated", raise_for_status=lambda: None)
+    provider.session = SimpleNamespace(post=lambda url, **kwargs: requests.append(kwargs) or response)
+    provider.pass_video_name = False
     sub.audio_language = "fra"
-    assert provider.query(SimpleNamespace(alpha3="spa"), sub) is sub
+    for alpha3, alpha2 in (("spa", "es"), ("deu", "de"), ("jpn", "ja"), ("por", "pt")):
+        sub.language = SimpleNamespace(alpha3=alpha3, alpha2=alpha2)
+        assert provider.query(sub.language, sub) is sub
+        provider.download(sub, "fr", None, b"pcm")
+        assert requests[-1]["params"]["target_language"] == alpha2
+        assert requests[-1]["params"]["language"] == "fr"
+    sub.language = SimpleNamespace(alpha3="eng", alpha2="en")
+    provider.download(sub, "fr", None, b"pcm")
+    assert "target_language" not in requests[-1]["params"]
+    sub.task = "transcribe"
+    sub.language = SimpleNamespace(alpha3="spa", alpha2="es")
+    sub.audio_language = "spa"
+    provider.download(sub, "es", None, b"pcm")
+    assert "target_language" not in requests[-1]["params"]
+    # Other endpoints keep native English translation, not the added targets.
+    provider.endpoint = "http://subgen:9000"
+    sub.task = "translate"
+    assert provider.query(SimpleNamespace(alpha3="eng", alpha2="en"), sub) is sub
+    for alpha3, alpha2 in (("spa", "es"), ("deu", "de"), ("jpn", "ja")):
+        sub.language = SimpleNamespace(alpha3=alpha3, alpha2=alpha2)
+        assert provider.query(sub.language, sub) is None
+        with pytest.raises(ValueError, match="configured Arc endpoint"):
+            provider.download(sub, "fr", None, b"pcm")
+    for marker in module.PREVIOUS_MARKERS:
+        with pytest.raises(RuntimeError, match="recreate"):
+            module.patch(source + "\n" + marker + "\n")

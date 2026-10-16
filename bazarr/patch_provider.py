@@ -11,23 +11,22 @@ import sys
 from pathlib import Path
 
 UPSTREAM_SHA256 = "257c450de9c0e2fa86a30582f9b8b4446756b197755c2c354a9ed604bdc92ed7"  # pragma: allowlist secret (public source checksum)
-MARKER = "# whisper-arc-bazarr Spanish provider extension v4"
-PREVIOUS_MARKERS = tuple(f"# whisper-arc-bazarr Spanish provider extension v{n}" for n in (1, 2, 3))
+MARKER = "# whisper-arc-bazarr multilingual provider extension v5"
+PREVIOUS_MARKERS = tuple(f"# whisper-arc-bazarr Spanish provider extension v{n}" for n in (1, 2, 3, 4))
 REPLACEMENTS = [
     ('            if language.alpha3 != "eng":',
-     # Source-language agnostic: the Arc adapter resolves the source language itself
-     # (tag / acoustic / lexical vote), so Spanish is offerable for a German dub too.
-     '            if language.alpha3 != "eng" and not (language.alpha3 == "spa" and self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):'),
+     # Keep upstream English translation elsewhere; Arc accepts ISO 639-1 targets.
+     '            if language.alpha3 != "eng" and not (len(wlm.alpha3_to_alpha2(language.alpha3) or "") == 2 and self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):'),
     ('        if subtitle.task == "error":',
-     '        if subtitle.task == "translate" and subtitle.language.alpha3 == "spa" and self.endpoint != os.environ.get("WHISPER_TRANSLATION_ENDPOINT"):\n'
+     '        if subtitle.task == "translate" and subtitle.language.alpha3 != "eng" and self.endpoint != os.environ.get("WHISPER_TRANSLATION_ENDPOINT"):\n'
      '            # Name the file so a refused download can be found in the Bazarr log.\n'
-     '            raise ConfigurationError(f"Spanish translation requires the configured Arc endpoint for {subtitle.video.original_path}")\n'
+     '            raise ConfigurationError(f"Text translation requires the configured Arc endpoint for {subtitle.video.original_path}")\n'
      '        if subtitle.task == "error":'),
     ('            output_language = "eng"',
      '            output_language = subtitle.language.alpha3'),
     ("                                      'video_file': video_name},\n                              files={'audio_file': out},",
      "                                      'video_file': video_name,\n"
-     "                                      **({'target_language': 'es'} if output_language == 'spa' and self.endpoint == os.environ.get('WHISPER_TRANSLATION_ENDPOINT') else {})},\n"
+     "                                      **({'target_language': subtitle.language.alpha2} if subtitle.task == 'translate' and output_language != 'eng' and self.endpoint == os.environ.get('WHISPER_TRANSLATION_ENDPOINT') else {})},\n"
      "                              files={'audio_file': out},"),
     ("        subtitle.content = r.content", "        r.raise_for_status()\n        subtitle.content = r.content"),
     ('''    def get_matches(self, video):
@@ -105,7 +104,7 @@ def main():
     if result != original:
         # Preserve owner, mode and inode (LinuxServer may have initialized permissions).
         path.write_text(result)
-    print("Whisper Arc Spanish provider extension verified")
+    print("Whisper Arc multilingual provider extension verified")
 
 
 if __name__ == "__main__":

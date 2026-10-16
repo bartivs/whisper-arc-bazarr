@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
-from languages import SOURCE_LOCALE, TARGET_LOCALE, parse_locale, resolve_source
+from languages import SOURCE_LOCALE, TARGET_LOCALE, parse_locale, resolve_source, target_locale
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 
@@ -189,7 +189,7 @@ def transcribe(pcm, task, language):
         audio = np.asarray(samples[start:start + WINDOW_SAMPLES], dtype=np.float32) / 32768.0
         options = {"task": task, "return_timestamps": True}
         if language:
-            options["language"] = f"<|{language}|>"
+            options["language"] = f"<|{'jw' if language == 'jv' else language}|>"
         result = pipeline().generate(audio, **options)
         offset = start / SAMPLE_RATE
         for segment in result.chunks:
@@ -224,7 +224,7 @@ def detect(pcm):
 @app.get("/status")
 def status():
     """Bazarr's Test Connection button expects JSON containing a version string."""
-    return {"version": "whisper-arc-openvino-base-3", "source_locale": SOURCE_LOCALE.unix,
+    return {"version": "whisper-arc-openvino-base-4", "source_locale": SOURCE_LOCALE.unix,
             "target_locale": TARGET_LOCALE.unix}
 
 
@@ -246,55 +246,50 @@ def asr(audio_file: UploadFile = File(...), task: str = "transcribe", language: 
               target=target_language or "-", encode=encode)
     try:
         try:
-            if language and len(language) > 2:
-                language = parse_locale(language).language
-            if target_language and len(target_language) > 2:
-                locale = parse_locale(target_language)
-                if locale.region and locale != TARGET_LOCALE:
-                    raise ValueError("Requested target locale differs from configured target locale")
-                target_language = locale.language
+            if language:
+                language = parse_locale("jv" if language == "jw" else language).language
+            requested_target = target_locale(target_language) if target_language else None
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if task not in ("transcribe", "translate") or output != "srt":
             raise HTTPException(400, "Only transcribe/translate with SRT output is supported")
-        if language and (len(language) != 2 or not language.isalpha()):
-            raise HTTPException(400, "language must be an ISO 639-1 code")
-        if target_language and (target_language != "es" or task != "translate"):
-            raise HTTPException(400, "Text translation targets Spanish with task=translate only")
+        if requested_target and task != "translate":
+            raise HTTPException(400, "Text translation requires task=translate")
         with exclusive() as waited:
             if waited:
                 log_event("asr queued", name=name, path=path, waited_seconds=round(waited, 1))
             with tempfile.TemporaryDirectory(prefix="whisper-arc-") as directory:
-                # Whisper cannot target Spanish. First transcribe English, then
-                # translate cue text only; keep all generated SRT timings unchanged.
+                # Explicit targets use source-language transcription followed by
+                # cue-text translation, preserving generated SRT timings.
                 pcm = pcm_path(audio_file, encode, directory)
                 source = language or ""
                 acoustic = ""
-                if target_language:
-                    # Any source language is allowed: the file may be a German
-                    # dub, so resolve the source instead of assuming English.
+                if requested_target:
+                    # Resolve the source rather than assuming the configured fallback.
                     acoustic = detect(pcm)["language_code"]
                     source, evidence = resolve_source(
-                        container_tag=language_hint(name), whisper_code=acoustic, fallback="en")
+                        container_tag=language_hint(name), whisper_code=acoustic,
+                        fallback=language or SOURCE_LOCALE.language)
                     log_event("language resolved", name=name, source_lang=source,
                               acoustic=acoustic or "-", evidence=evidence)
-                data = transcribe(pcm, "transcribe" if target_language else task, source)
+                data = transcribe(pcm, "transcribe" if requested_target else task, source)
                 log_event("asr transcribed", name=name, cues=cue_count(data), source_lang=source or "auto")
-                if target_language:
+                if requested_target:
                     from translation import translate_srt
 
                     try:
-                        # Cross-check the transcript itself; a lexical win means the
-                        # acoustic guess and the stored tag were both wrong.
+                        # Use the lexical check only if higher-priority hints are absent.
                         source, evidence = resolve_source(
                             container_tag=language_hint(name), whisper_code=acoustic,
                             text=data.decode("utf-8", "ignore"),
-                            fallback=source or "en")
-                        data = translate_srt(data, media_name=name, source_code=source)
-                        log_event("translation ok", name=name, source_lang=source, evidence=evidence)
+                            fallback=source or SOURCE_LOCALE.language)
+                        data = translate_srt(data, media_name=name, source_code=source,
+                                             target_locale=requested_target)
+                        log_event("translation ok", name=name, source_lang=source,
+                                  target_lang=requested_target.unix, evidence=evidence)
                     except (RuntimeError, ValueError, OSError) as exc:
                         log_event("translation failed", name=name, reason=type(exc).__name__)
-                        raise HTTPException(503, "Spanish translation failed; no subtitles returned") from exc
+                        raise HTTPException(503, "Text translation failed; no subtitles returned") from exc
         cues = cue_count(data)
         log_event("asr ok" if cues else "asr empty", name=name, path=path, cues=cues,
                   bytes_out=len(data), seconds=round(time.monotonic() - started, 1))

@@ -7,16 +7,16 @@ Generate **local AI subtitles for [Bazarr](https://www.bazarr.media/)** with **I
 
 - **Same-language transcription:** generate subtitles in the original audio language, for languages supported by Whisper.
 - **Translation into English:** use Whisper's native translation to turn supported non-English audio into English subtitles, entirely locally.
-- **Optional translation into Spanish:** add the Spanish extension for English → Spanish offline, or other source languages → Spanish through a LiteLLM/OpenAI-compatible proxy. The proxy supports a neutral Latin American Spanish prompt.
+- **Optional multilingual translation:** add the extension for **any supported source language → any supported target language** through a LiteLLM/OpenAI-compatible proxy, for example Japanese → French, German → Portuguese or English → Spanish. Select the output language per API request or Bazarr profile.
 
-Spanish is the only target of the **added text-translation layer**, not the only supported subtitle language. Transcription and native English translation need no API keys; only proxy-based Spanish translation requires a configured endpoint/key. No media mounts or published host ports. Audio stays local even when proxy translation is enabled.
+Source-language coverage depends on Whisper; target-language coverage and translation quality depend on the proxy model. The API accepts ISO 639-1 language codes and regional locales such as `fr_FR.UTF-8`, `pt-BR` and `es_419.UTF-8`. **Offline text translation remains English → Spanish only**; transcription and native Whisper translation into English also run locally without API keys. No media mounts or published host ports. Audio stays local even when proxy translation is enabled.
 
 ## Features
 
 - **Intel Arc speech recognition:** Whisper `base` runs on the GPU through OpenVINO, with no silent CPU fallback.
-- **Bazarr Whisper provider compatibility:** use the existing provider for transcription and native translation into English; add the scoped hook for Spanish translations.
+- **Bazarr Whisper provider compatibility:** use the existing provider for transcription and native translation into English; add the scoped hook for other translation targets.
 - **Offline English → Spanish subtitles:** bundled OPUS-MT/CTranslate2 int8 text translation on CPU.
-- **Multilingual → Spanish via LiteLLM:** resolve the source language and translate cue text while preserving SRT timestamps.
+- **Many-to-many translation via LiteLLM:** resolve the source language and translate into the requested output language while preserving SRT timestamps.
 - **Self-hosted Docker deployment:** private network, read-only model mounts and a bounded inference queue.
 
 ## API overview
@@ -25,9 +25,9 @@ Spanish is the only target of the **added text-translation layer**, not the only
 - `/detect-language`: Bazarr-compatible `language_code` and `detected_language` JSON.
 - `/status`: version for Bazarr's Test Connection button; `/health`: GPU/model availability.
 - Whisper base runs on **GPU explicitly**, never silently on CPU.
-- Spanish text translation preserves cue numbering and timestamps, and runs on either:
+- Explicit-target text translation preserves cue numbering and timestamps, and runs on either:
   - an OpenAI-compatible **LiteLLM proxy** (primary; the fleet proxy on `openweb-ui`), or
-  - the bundled **OPUS-MT/CTranslate2 int8** local model, used automatically for **English sources only** when the proxy is missing or fails.
+  - the bundled **OPUS-MT/CTranslate2 int8** local model, used automatically for **English → Spanish only** when the proxy is missing or fails.
 
 Tested on an **Intel Arc A380**, including Docker inside Proxmox LXC. The host must expose `/dev/dri` and the LXC must already have permission to access it. This project does not change Proxmox/BIOS settings or install host GPU drivers.
 
@@ -35,7 +35,7 @@ Tested on an **Intel Arc A380**, including Docker inside Proxmox LXC. The host m
 
 - [Docker Compose quick start](#quick-start-docker-compose-on-intel-arc)
 - [Bazarr Whisper provider setup](#bazarr-transcription-and-native-whisper-translation)
-- [Spanish translation extension](#bazarr-multilingual--spanish-extension)
+- [Multilingual translation extension](#bazarr-multilingual-translation-extension)
 - [LiteLLM and offline translation](#translation-engine-litellm-proxy-recommended-or-local-model)
 - [Subtitle matching and scores](#matching-and-scores)
 - [Troubleshooting downloads](#diagnosing-failed-downloads)
@@ -76,11 +76,13 @@ No port is published. Use `docker exec` or another container on the same network
 
 Settings → Providers → enable **Whisper**, endpoint **`http://whisper-arc:9000`**. Keep connection timeout 5s; set the read timeout above the queue wait plus one transcription (3600s is a safe start). Turn on “Pass video filename” for upstream Whisper; the extension below always passes it for the configured Arc endpoint. The path is never read or followed, but its filename supplies language hints and makes a failing episode findable in logs (see [Diagnosing failed downloads](#diagnosing-failed-downloads)).
 
-Select your language profile and use **Manual Search** on one episode. Whisper supports same-language transcription and native translation **into English**. Without the extension below, Bazarr does not list translations into Spanish. Exclude `whisperai` from automatic audio sync. For automatic downloads, note Whisper's low fixed scores (220/360 episodes, 60/180 movies); lowering global scores can admit bad matches from other providers.
+Select your language profile and use **Manual Search** on one episode. Whisper supports same-language transcription and native translation **into English**. Without the extension below, Bazarr only lists translation targets of English. Exclude `whisperai` from automatic audio sync. For automatic downloads, note Whisper's low fixed scores (220/360 episodes, 60/180 movies); lowering global scores can admit bad matches from other providers.
 
-## Bazarr: multilingual → Spanish extension
+<a id="bazarr-multilingual--spanish-extension"></a>
 
-The built-in Whisper provider filters out Spanish translation results **before** calling the API. The included startup hook allows Spanish translations from any source language, only for an explicitly selected endpoint. The adapter resolves the source language before translation; non-English sources need the proxy engine. Other endpoints (such as CPU Subgen) retain upstream behavior.
+## Bazarr: multilingual translation extension
+
+The built-in Whisper provider filters out translation targets other than English **before** calling the API. The included startup hook allows ISO 639-1 targets from Bazarr's supported Whisper language list, only for an explicitly selected endpoint. The adapter resolves the source language and translates into the profile's requested target. All text-translation pairs except English → Spanish require the proxy engine. Other endpoints (such as CPU Subgen) retain upstream behavior. English targets still use native Whisper translation; matching audio/profile languages use native transcription.
 
 The hook is tested against this LinuxServer Bazarr image:
 
@@ -101,20 +103,20 @@ services:
       - ./bazarr/patch_provider.py:/opt/whisper-arc/patch_provider.py:ro
 ```
 
-Ensure `bazarr/90-whisper-translation.sh` is executable, then recreate **only Bazarr** using your own stack command. The hook verifies a known upstream SHA-256 and compiles the result before writing. It is idempotent; unknown provider versions are rejected, not modified. The hook runs on every container start, so upgrading this file changes its marker: **recreate** the Bazarr container rather than restarting it, otherwise the hook stops with `Older Whisper extension found; recreate the Bazarr container to re-apply this hook` and the previous patch (still functional) stays in the container layer. Review/retest the hook before upgrading the Bazarr pin. LinuxServer may continue starting after an init-hook error, so check logs for `Whisper Arc Spanish provider extension verified`; a running container alone does not prove the extension loaded.
+Ensure `bazarr/90-whisper-translation.sh` is executable, then recreate **only Bazarr** using your own stack command. The hook verifies a known upstream SHA-256 and compiles the result before writing. It is idempotent; unknown provider versions are rejected, not modified. The hook runs on every container start, so upgrading this file changes its marker: **recreate** the Bazarr container rather than restarting it, otherwise the hook stops with `Older Whisper extension found; recreate the Bazarr container to re-apply this hook` and the previous patch (still functional) stays in the container layer. Review/retest the hook before upgrading the Bazarr pin. LinuxServer may continue starting after an init-hook error, so check logs for `Whisper Arc multilingual provider extension verified`; a running container alone does not prove the extension loaded.
 
-In Bazarr keep the Whisper endpoint above, select a **Spanish** language profile, then manually search an episode. The result appears under **Whisper**, not as a separate provider. Clicking download transcribes on Arc, then translates cue text through the proxy or, for English sources, the local CPU model. Spanish-audio transcription remains native Whisper.
+In Bazarr keep the Whisper endpoint above, select the desired language profile (for example **French**, **Japanese**, **Portuguese** or **Spanish**), then manually search an episode. The result appears under **Whisper**, not as a separate provider. Clicking download transcribes on Arc, then translates cue text into the requested language through the proxy or, for English → Spanish only, the local CPU model. The profile selects the output language; `TRANSLATION_TARGET_LOCALE` does not replace it. Bare targets matching the configured target language inherit its region (for example Spanish with `es_419.UTF-8`); other profile targets use their bare language code.
 
 To roll back: remove both hook mounts and `WHISPER_TRANSLATION_ENDPOINT` and recreate Bazarr from its image. Switch endpoint to your previous ASR/Subgen service for CPU fallback (that fallback cannot translate English → Spanish).
 
 ## Translation engine: LiteLLM proxy (recommended) or local model
 
-Spanish cue text is translated by the first engine that is configured and healthy:
+Subtitle cue text is translated by the first engine that is configured and healthy:
 
-1. **LiteLLM / OpenAI-compatible endpoint** (`TRANSLATION_ENDPOINT` + `TRANSLATION_API_KEY`), using the resolved source language.
-2. **Bundled English → Spanish local model** (automatic fallback for English, or the only engine when no endpoint/key is set).
+1. **LiteLLM / OpenAI-compatible endpoint** (`TRANSLATION_ENDPOINT` + `TRANSLATION_API_KEY`), using the resolved source language and the per-request target language/locale.
+2. **Bundled English → Spanish local model** (automatic fallback for that pair only, or the only translation engine when no endpoint/key is set).
 
-Non-English sources never fall back to the English-only model: if the proxy is unavailable or fails, the API returns `503` with no subtitles.
+Other pairs never fall back to the English → Spanish model: if the proxy is unavailable or fails, the API returns `503` with no subtitles. Same-language requests preserve cue text without calling a translation engine; they do not perform regional rewriting. Native English translation remains available without the proxy by omitting `target_language`.
 
 Only the translation text ever leaves the host, and only when the proxy path is used: your **audio never leaves** the machine, and neither do cue numbers or timestamps. Set an empty `TRANSLATION_API_KEY` for a fully offline deployment.
 
@@ -148,20 +150,22 @@ curl -sS -X POST http://<litellm>:4000/key/generate \
 
 The returned `sk-...` value is the `TRANSLATION_API_KEY`. Rotate by deleting the old key (`/key/delete`) and repeating. Note the key is sent over plain HTTP unless your endpoint terminates TLS, so keep it on a trusted network.
 
-**Reliability.** Each batch is a numbered JSON request sent with a strict JSON-schema `response_format`, and a reply is accepted only when it has exactly one non-empty translation per requested cue index; otherwise it is retried once and, for English sources with fallback enabled, handed to the local model. Reordered replies are re-ordered by index rather than discarded. Malformed shapes (missing keys, boolean/fractional/duplicate indices, blank or truncated content) are rejected instead of crashing or misaligning cues. Batches are 16 cues by default (`TRANSLATION_BATCH_CUES`, max 64) with a bounded `TRANSLATION_MAX_TOKENS`, so a long episode cannot ask for one oversized completion. Each batch logs its file, batch number, engine and retry reasons — never subtitle text, credentials or upstream response bodies. Failures never yield English subtitles labelled as Spanish.
+**Reliability.** Each batch is a numbered JSON request sent with a strict JSON-schema `response_format`, and a reply is accepted only when it has exactly one non-empty translation per requested cue index; otherwise it is retried once and, for English → Spanish with fallback enabled, handed to the local model. Reordered replies are re-ordered by index rather than discarded. Malformed shapes (missing keys, boolean/fractional/duplicate indices, blank or truncated content) are rejected instead of crashing or misaligning cues. Batches are 16 cues by default (`TRANSLATION_BATCH_CUES`, max 64) with a bounded `TRANSLATION_MAX_TOKENS`, so a long episode cannot ask for one oversized completion. Each batch logs its file, batch number, engine and retry reasons — never subtitle text, credentials or upstream response bodies. Translation failures never return the source transcript labelled as the requested target.
 
-**Source-language resolution.** Spanish translation requests use a priority-based evidence chain: a recognized language token in the supplied filename (for example `German.Dubbed`), then Whisper acoustic detection, then a lightweight transcript word classifier, finally English as a fallback. This is not a majority vote: filename hints take precedence over acoustic detection, and the lexical check does not override either usable hint. The API's `language` argument does not force the source for Spanish translation. Logs record `source_lang`, `acoustic` and the deciding `evidence`; the supplied media path is never opened.
+**Source-language resolution.** Explicit-target translation requests use a priority-based evidence chain: a recognized language token in the supplied filename (for example `German.Dubbed`), then Whisper acoustic detection, then a lightweight transcript word classifier. The API's `language` argument, or `TRANSLATION_SOURCE_LOCALE` when omitted, is the final fallback. This is not a majority vote: filename hints take precedence over acoustic detection, and the lexical check does not override either usable hint. The API's `language` argument does not force the source for explicit-target translation. Logs record `source_lang`, `acoustic` and the deciding `evidence`; the supplied media path is never opened.
 
 **Language settings (Unix/POSIX).** Locale settings are validated at start-up. For neutral Latin American Spanish, set these in `.env` or export them before starting Compose:
 
 ```bash
-TRANSLATION_SOURCE_LOCALE=en_US.UTF-8     # English local-model source setting
+TRANSLATION_SOURCE_LOCALE=en_US.UTF-8     # source detection fallback, not a model selector
 TRANSLATION_TARGET_LOCALE=es_419.UTF-8    # neutral Latin American Spanish
 ```
 
-`es_419.UTF-8` and `es-419` are accepted, as are `es_MX.UTF-8`, `es-MX`, `es_MX` and bare `es`. **The current code and Compose default remains `es_MX.UTF-8`; set `es_419.UTF-8` explicitly to use the Latin America locale label.** The proxy prompt favors neutral Latin American vocabulary and grammar (`computadora`, `celular`, `ustedes`, not `ordenador`, `móvil`, `vosotros`). `/status` and `/health` report the effective locales; `source_locale` is a configuration value, not the per-request detected source.
+Locales accept ISO 639-1 codes with an optional ISO 3166-1 country code (or `419` for Latin America), with `_`/`-` separators and optional UTF-8 encoding. Examples: `fr`, `de_DE.UTF-8`, `ja-JP`, `pt_BR`, `es_419.UTF-8`. Script subtags such as `zh_Hant` are not supported. **The current code and Compose default remains `es_MX.UTF-8`; set `es_419.UTF-8` explicitly to use the Latin America locale label.** The Latin American vocabulary prompt (`computadora`, `celular`, `ustedes`) is applied only to Spanish targets with Latin American regions; French, Japanese, Spain Spanish and other targets use their own language/region label without Spanish-specific instructions. `/status` and `/health` report configured default locales, not each request's resolved source or target.
 
-**The offline fallback cannot regionalise**: OPUS-MT is trained on generic Spanish, so its batches log `engine=local locale_fidelity=generic_Spanish`. An explicit regional target must match the configured target locale (for example, `target_language=es_ES.UTF-8` is rejected with `400` when configured for `es_419.UTF-8`). Bare `target_language=es` uses the configured target. The text locale does not change Bazarr's profile or subtitle tag; see [conflicting language rules](#search-completes-without-downloading-conflicting-language-rules).
+**Per-request targets override the configured default**: `target_language=fr_CA.UTF-8` requests Canadian French even when configured for Spanish. A bare target matching the configured language inherits its region (`es` → `es_419.UTF-8` when configured that way); other bare targets use no region. Omitting `target_language` preserves native Whisper behavior and does **not** automatically translate into `TRANSLATION_TARGET_LOCALE`.
+
+**The offline fallback cannot regionalise**: OPUS-MT is trained on generic Spanish, so its batches log `engine=local locale_fidelity=generic_Spanish`. Changing configured locales does not change the offline model's supported pair. The text locale does not change Bazarr's profile or subtitle tag; see [conflicting language rules](#search-completes-without-downloading-conflicting-language-rules).
 
 ## Matching and scores
 
@@ -174,20 +178,30 @@ Bazarr scores candidate subtitles by comparing release metadata. A generated sub
 
 For episodes, the built-in series/season/episode matches score **220/360 (~61%)**. Matching year adds 90 and release group adds 20, yielding at most **330/360 (~92%)**. This deliberately limited match set clears a 90% minimum when both fields match while staying below a real release scoring around 93%, so that release can be preferred. Missing metadata lowers the score; this is not a guaranteed 92% score or a movie-score ceiling.
 
-> **Caveat:** this is a *release-matching* score, not a translation-quality measurement. A high score means Bazarr is confident the subtitle belongs to that episode — it says nothing about how good the Spanish is. Keep manual review; do not lower `minimum_score` globally just because one provider scores high.
+> **Caveat:** this is a *release-matching* score, not a translation-quality measurement. A high score means Bazarr is confident the subtitle belongs to that episode — it says nothing about transcription or translation quality. Keep manual review; do not lower `minimum_score` globally just because one provider scores high.
 
 ## API smoke test
 
 From a container on Bazarr's network, given a short PCM test clip:
 
 ```bash
+# Detect/transcribe the source and translate cue text into French (proxy required).
 curl -f -F audio_file=@clip.pcm \
-  'http://whisper-arc:9000/asr?encode=false&language=en&task=translate&target_language=es&output=srt'
+  'http://whisper-arc:9000/asr?encode=false&task=translate&target_language=fr&output=srt'
+# A different output locale, without restarting or reconfiguring the service.
+curl -f -F audio_file=@clip.pcm \
+  'http://whisper-arc:9000/asr?encode=false&task=translate&target_language=pt_BR.UTF-8&output=srt'
+# English -> Spanish can also use the offline model.
+curl -f -F audio_file=@english-clip.pcm \
+  'http://whisper-arc:9000/asr?encode=false&task=translate&target_language=es&output=srt'
+# Native Whisper -> English: omit target_language; no proxy needed.
+curl -f -F audio_file=@clip.pcm \
+  'http://whisper-arc:9000/asr?encode=false&task=translate&output=srt'
 curl -f -F audio_file=@clip.pcm \
   'http://whisper-arc:9000/detect-language?encode=false'
 ```
 
-Omitting `target_language` preserves native Whisper behavior. Spanish targets require `task=translate`; `language` may be omitted or supplied, but the adapter resolves the source from filename/acoustic/transcript evidence. Non-English translation requires the proxy. Other targets or incompatible task/target combinations return 400. Translation errors return 503 with no subtitles, never untranslated text mislabeled as Spanish. Concurrent requests wait for the single pipeline and then run in order (see [Diagnosing failed downloads](#diagnosing-failed-downloads)); they only fail with 503 + `Retry-After` after the queue wait expires or the bounded queue is full.
+`target_language` accepts any ISO 639-1 language or supported locale and requires `task=translate`. `language` may be omitted or supplied; the adapter resolves the source from filename/acoustic/transcript evidence. Invalid language codes/locales or incompatible task/target combinations return 400. Translation errors return 503 with no subtitles, never text mislabeled as the requested language. Concurrent requests wait for the single pipeline and then run in order (see [Diagnosing failed downloads](#diagnosing-failed-downloads)); they only fail with 503 + `Retry-After` after the queue wait expires or the bounded queue is full.
 
 ## Diagnosing failed downloads
 
@@ -208,7 +222,7 @@ asr start file="Show.S01E03.mkv" path="/data/media/series/99/Season 01/Show.S01E
 asr queued file="Show.S01E03.mkv" path="..." waited_seconds=41.2
 language resolved file="Show.S01E03.mkv" source_lang=en acoustic=en evidence=whisper_acoustic
 asr transcribed file="Show.S01E03.mkv" cues=812 source_lang=en
-translation ok file="Show.S01E03.mkv" source_lang=en evidence=whisper_acoustic
+translation ok file="Show.S01E03.mkv" source_lang=en target_lang=es_MX.UTF-8 evidence=whisper_acoustic
 asr ok file="Show.S01E03.mkv" path="..." cues=812 bytes_out=41234 seconds=97.4
 asr empty file="Show.S01E05.mkv" path="..." cues=0 bytes_out=0 seconds=63.1
 asr failed file="Show.S01E04.mkv" path="..." status=503 reason=Whisper queue wait timed out seconds=900.0
@@ -217,9 +231,9 @@ detect ok file="Show.S01E06.mkv" path="..." language=en seconds=1.2
 
 How to read the result:
 
-- `asr failed`/`detect failed` carry the exact HTTP status and reason: `503` can mean a queue/timeout problem or translation failure; `400`/`413` indicates invalid parameters, malformed audio or oversized input. GPU/model initialization errors may return `500`; `/health` returns `503` when its GPU/model availability check fails. Translation logs distinguish proxy retries, local fallback and unsupported non-English fallback.
+- `asr failed`/`detect failed` carry the exact HTTP status and reason: `503` can mean a queue/timeout problem or translation failure; `400`/`413` indicates invalid parameters, malformed audio or oversized input. GPU/model initialization errors may return `500`; `/health` returns `503` when its GPU/model availability check fails. Translation logs distinguish proxy retries, local fallback and unsupported source/target fallback.
 - `asr empty` means the audio produced no cues (silence, music or an all-speech-off episode); Bazarr receives a successful but empty subtitle.
-- **No line at all for an episode** means Bazarr never called this service. Check the Bazarr log for the same file name: the provider can refuse before upload for unsupported target languages, a Spanish translation on an endpoint other than the configured Arc endpoint (the hook includes the full path in that message), or an audio track with no usable language when detection fails.
+- **No line at all for an episode** means Bazarr never called this service. Check the Bazarr log for the same file name: the provider can refuse before upload for unsupported target languages, a non-English translation target on an endpoint other than the configured Arc endpoint (the hook includes the full path in that message), or an audio track with no usable language when detection fails.
 
 ### Search completes without downloading: conflicting language rules
 
@@ -256,9 +270,13 @@ Keep `WHISPER_GATE_WAIT_SECONDS` below Bazarr's provider read timeout, otherwise
 
 Yes. Configure Bazarr's Whisper provider to use this service. OpenVINO runs Whisper speech recognition on Intel Arc; the service returns SRT subtitles for Bazarr to save. An Arc A380 has been tested; other GPUs are not validated here.
 
-### Can I translate subtitles into Spanish without a cloud API?
+### Can I translate any input language into any output language?
 
-Yes, for English audio: Whisper transcription and the bundled English → Spanish model run locally. Other source languages require the optional translation proxy, which receives cue text but not audio, media filenames or timestamps.
+The proxy path supports any ISO 639-1 target language your selected model can translate, from any source language Whisper can transcribe. Choose `target_language` per API request or the desired Bazarr profile. Model coverage and quality vary; this is not a guarantee for every language pair.
+
+### Which translations work without a proxy?
+
+Whisper's native translation into English, and the bundled English → Spanish text model, run locally. Other translation pairs require a LiteLLM/OpenAI-compatible proxy, which receives cue text but not audio, media filenames or timestamps. A proxy on another local server can keep inference on your network; a cloud-backed model sends text to its provider.
 
 ### Do I need an NVIDIA GPU or CUDA?
 
@@ -274,7 +292,7 @@ pip install -r requirements-test.txt
 pytest -q
 ```
 
-Unit/API tests use fake inference so they run without GPU or model weights. They validate chunk timestamps, detection, target validation, translation error handling, cue alignment, and hook compatibility/scoping. Real GPU/provider smoke tests must also be run on the deployment host.
+Unit/API tests use fake inference so they run without GPU or model weights. They validate chunk timestamps, source detection, per-request multilingual targets/locales, prompt scoping, concurrent target isolation, fail-closed offline pairs, cue alignment, and hook compatibility/scoping. Real GPU/provider smoke tests must also be run on the deployment host.
 
 ## Limitations
 
@@ -282,7 +300,7 @@ Unit/API tests use fake inference so they run without GPU or model weights. They
 - Whisper `base` is fast but less accurate than larger models; hallucinations and speech split at 30-second window boundaries are possible.
 - Translation is batched per cue group, not whole-film context; quality and line-length conventions are not guaranteed. Review samples before bulk use.
 - With the proxy engine enabled, subtitle **text** is sent to the configured provider (e.g. OpenRouter) and is subject to that provider's retention policy. Audio never leaves the host. Disable by clearing `TRANSLATION_API_KEY` to stay fully offline.
-- Spanish is the only text-translation target. Non-English sources require the proxy; the local model handles English → generic Spanish only. The proxy prompt favors neutral Latin American Spanish; locale selection is not a guarantee of regional fidelity.
+- Arbitrary source/target pairs require a capable translation proxy. The bundled local text model handles English → generic Spanish only; unsupported offline pairs fail explicitly. Locale selection is not a guarantee of regional fidelity. Bazarr's hook is limited to its provider's language list and ISO 639-1 targets, even if the proxy knows additional languages.
 - Automated Bazarr score is release matching, not translation quality.
 - One inference request at a time, 2 CPU / 2 GiB cap in Compose. Extra requests queue in order (bounded by `WHISPER_GATE_WAIT_SECONDS`/`WHISPER_MAX_WAITERS`) instead of failing immediately, so parallel Bazarr searches serialize. First GPU initialization is slower. The adapter retains its models in memory.
 - The unauthenticated API belongs on a trusted private Docker network. Do not expose it publicly. Uploads over 512 MiB are rejected by application logic after multipart parsing; use a reverse proxy body-size limit if accepting untrusted clients.

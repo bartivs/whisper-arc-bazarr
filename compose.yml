@@ -14,15 +14,16 @@ services:
       - ./models/translation:/translation-model:ro
     environment:
       # Optional translation engine: any OpenAI-compatible endpoint (the fleet
-      # LiteLLM proxy is what this project is tested against). Leave the key
-      # empty to translate fully offline with the bundled local model.
+      # LiteLLM proxy is what this project is tested against). Required for
+      # arbitrary source/target pairs; offline translation is English -> Spanish only.
       - TRANSLATION_ENDPOINT=${TRANSLATION_ENDPOINT:-}
       - TRANSLATION_MODEL=${TRANSLATION_MODEL:-subtitle-translate}
       - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-}
-      # Fall back to the local model if the proxy fails or returns junk.
+      # Fall back only for English -> Spanish if the proxy fails or returns junk.
       - TRANSLATION_LOCAL_FALLBACK=${TRANSLATION_LOCAL_FALLBACK:-true}
-      # Unix/POSIX locale notation. The target locale drives the regional prompt
-      # (e.g. Mexican Spanish); the offline fallback is generic Spanish only.
+      # Unix/POSIX locale notation. Source is the detection fallback. Target is
+      # the default region for matching bare target codes; explicit API locales
+      # override it. Other target languages use their own labels (fr, ja, pt_BR).
       - TRANSLATION_SOURCE_LOCALE=${TRANSLATION_SOURCE_LOCALE:-en_US.UTF-8}
       - TRANSLATION_TARGET_LOCALE=${TRANSLATION_TARGET_LOCALE:-es_MX.UTF-8}
       # Request logs name the media file Bazarr sends as video_file. Extra

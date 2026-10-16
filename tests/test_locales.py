@@ -26,7 +26,7 @@ def test_locale_aliases(value, unix, label):
     assert locale.label == label
 
 
-@pytest.mark.parametrize("value", ["C", "es_XX.UTF-8", "en_MX", "es_MX@evil", "es_MX.ISO-8859-1", "es\nMX"])
+@pytest.mark.parametrize("value", ["C", "es_XX.UTF-8", "xx_US", "es_MX@evil", "es_MX.ISO-8859-1", "es\nMX"])
 def test_bad_locale_rejected(value):
     with pytest.raises(ValueError):
         parse_locale(value)
@@ -35,7 +35,7 @@ def test_bad_locale_rejected(value):
 def test_posix_api_language_and_target_are_normalized(monkeypatch):
     model = FakePipeline()
     monkeypatch.setattr(arc, "pipeline", lambda: model)
-    monkeypatch.setattr(translation, "translate_texts", lambda texts, source_code="en": ["Hola" for _ in texts])
+    monkeypatch.setattr(translation, "translate_texts", lambda texts, source_code="en", target_locale=None: ["Hola" for _ in texts])
     response = client.post("/asr", params={"language": "en_US.UTF-8", "task": "translate", "target_language": "es_MX.UTF-8"},
                            files={"audio_file": ("test.pcm", b"\0\0" * 16000)})
     assert response.status_code == 200
@@ -44,7 +44,7 @@ def test_posix_api_language_and_target_are_normalized(monkeypatch):
     assert client.get("/status").json()["target_locale"] == "es_MX.UTF-8"
     response = client.post("/asr?language=en&task=translate&target_language=es_ES.UTF-8",
                            files={"audio_file": ("test.pcm", b"\0\0" * 16000)})
-    assert response.status_code == 400
+    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("cue", [
