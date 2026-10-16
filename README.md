@@ -182,6 +182,25 @@ How to read the result:
 - `asr empty` means the audio produced no cues (silence, music or an all-speech-off episode); Bazarr receives a successful but empty subtitle.
 - **No line at all for an episode** means Bazarr never called this service. Check the Bazarr log for the same file name: the provider refuses before the upload when the requested language is not English/→Spanish (the hook now includes the full path in that message), or when the audio track has no usable language and detection fails.
 
+### Search completes without downloading: conflicting language rules
+
+For a **Spanish** (`es`) profile, use only **Spanish (Latino) → Spanish** in
+Bazarr's Settings → Languages → Language Equals (`spl:spa`). Do not add the
+reverse `spa:spl` rule: these rules rewrite returned subtitle languages. With
+both directions, ordinary Spanish results from Whisper and direct providers
+become `es-MX` and are rejected as `Skipping, language not searched for` before
+scoring or download. Removing the reverse rule was verified with an actual
+episode download from OpenSubtitles, synchronization, and a cleared missing flag.
+
+Bazarr displays `es-MX` as **Spanish (Latino)**. The adapter's `es_419.UTF-8`
+locale controls translation text, not the Bazarr profile/tag; changing the text
+locale cannot fix this selection failure. Language-equals rules apply to provider
+results and do not automatically relabel existing files. Search APIs enqueue
+work: wait for the job, then check history and the indexed subtitle file rather
+than treating HTTP 204 or a completed search card as proof of a download.
+Disable diagnostic debug logging afterward: provider HTTP logs can contain API
+credentials.
+
 Tuning (all optional, defaults shown):
 
 | Variable | Default | Meaning |
