@@ -116,7 +116,29 @@ curl -sS -X POST http://<litellm>:4000/key/generate \
 
 The returned `sk-...` value is the `TRANSLATION_API_KEY`. Rotate by deleting the old key (`/key/delete`) and repeating. Note the key is sent over plain HTTP unless your endpoint terminates TLS, so keep it on a trusted network.
 
-**Reliability.** Each batch is a numbered JSON request, and a reply is accepted only when it has exactly one non-empty translation per requested cue index; otherwise it is retried once and then handed to the local model. Reordered replies are re-ordered by index rather than discarded. Translation failures never yield English subtitles labelled as Spanish.
+**Reliability.** Each batch is a numbered JSON request sent with a strict JSON-schema `response_format`, and a reply is accepted only when it has exactly one non-empty translation per requested cue index; otherwise it is retried once and then handed to the local model. Reordered replies are re-ordered by index rather than discarded. Malformed shapes (missing keys, boolean/fractional/duplicate indices, blank or truncated content) are rejected instead of crashing or misaligning cues. Batches are 16 cues by default (`TRANSLATION_BATCH_CUES`, max 64) with a bounded `TRANSLATION_MAX_TOKENS`, so a long episode cannot ask for one oversized completion. Each batch logs its file, batch number, engine and retry reasons — never subtitle text, credentials or upstream response bodies. Failures never yield English subtitles labelled as Spanish.
+
+**Language settings (Unix/POSIX).** The source and target are configured in locale notation and validated at start-up:
+
+```bash
+TRANSLATION_SOURCE_LOCALE=en_US.UTF-8     # source dialogue
+TRANSLATION_TARGET_LOCALE=es_MX.UTF-8     # regional Spanish target
+```
+
+Accepted forms include `es_MX.UTF-8`, `es-MX`, `es_MX` and the bare language (`es`). The target locale is what makes the model produce regional Spanish — `es_MX` asks for Mexican vocabulary rather than a generic translation. `/status` and `/health` report the effective locales. **The offline fallback cannot regionalise**: OPUS-MT is trained on generic Spanish, so its batches log `engine=local locale_fidelity=generic_Spanish`. Requests that contradict the configured pair (for example `target_language=es_ES.UTF-8`) are rejected with `400` rather than silently served.
+
+## Matching and scores
+
+Bazarr scores candidate subtitles by comparing release metadata. A generated subtitle is produced **from the exact input file**, so it is bound to that path and can legitimately claim matching source fields:
+
+- The result is tied to the input path (`video_file`), and matching source metadata (year, source, release group, resolution, video/audio codec, streaming service, edition) is snapshotted from that same file.
+- Only fields that are **populated and equal** are claimed; a result generated from one episode is never scored against another path.
+- The release column shows the file name so it is obvious which episode the generated subtitle came from.
+- **No hash match, hearing-impaired, forced or quality claim is fabricated.** `hash_verifiable` stays `false`.
+
+This lifts the built-in Whisper fixed score (about 61% for episodes when only series/season/episode match) toward the metadata-based maximum, which lets normal score thresholds and upgrade handling work without lowering global minimums.
+
+> **Caveat:** this is a *release-matching* score, not a translation-quality measurement. A high score means Bazarr is confident the subtitle belongs to that episode — it says nothing about how good the Spanish is. Keep manual review; do not lower `minimum_score` globally just because one provider scores high.
 
 ## API smoke test
 
@@ -188,7 +210,8 @@ Unit/API tests use fake inference so they run without GPU or model weights. They
 - Whisper `base` is fast but less accurate than larger models; hallucinations and speech split at 30-second window boundaries are possible.
 - Translation is batched per cue group, not whole-film context; quality and line-length conventions are not guaranteed. Review samples before bulk use.
 - With the proxy engine enabled, subtitle **text** is sent to the configured provider (e.g. OpenRouter) and is subject to that provider's retention policy. Audio never leaves the host. Disable by clearing `TRANSLATION_API_KEY` to stay fully offline.
-- English → standard Spanish only in the text layer. Other requested targets fail explicitly.
+- English → Spanish only in the text layer. Other requested targets fail explicitly, and the regional target (`es_MX`) is honoured by the LLM engine only — the local fallback is generic Spanish.
+- Automated Bazarr score is release matching, not translation quality.
 - One inference request at a time, 2 CPU / 2 GiB cap in Compose. Extra requests queue in order (bounded by `WHISPER_GATE_WAIT_SECONDS`/`WHISPER_MAX_WAITERS`) instead of failing immediately, so parallel Bazarr searches serialize. First GPU initialization is slower. The adapter retains its models in memory.
 - The unauthenticated API belongs on a trusted private Docker network. Do not expose it publicly. Uploads over 512 MiB are rejected by application logic after multipart parsing; use a reverse proxy body-size limit if accepting untrusted clients.
 - Uploaded audio uses temporary disk files (removed after each request); no media paths are followed and no subtitles are written into your library by the service. Bazarr performs the final save.

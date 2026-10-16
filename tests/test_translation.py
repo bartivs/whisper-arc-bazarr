@@ -24,6 +24,7 @@ def proxy_env(monkeypatch):
     monkeypatch.setattr(translation, "MODEL", "subtitle-translate")
     monkeypatch.setattr(translation, "LOCAL_FALLBACK", True)
     monkeypatch.setattr(translation, "local_available", lambda: True)
+    monkeypatch.setattr(translation, "RETRY_DELAY", 0)
 
 
 def reply(cues):
@@ -169,12 +170,26 @@ def test_hook_rejects_unknown_and_preserves_idempotence(monkeypatch):
     module = hook_module()
     with pytest.raises(RuntimeError):
         module.patch("unknown upstream code")
-    source = '''class Provider:
+    source = '''class MatchedSubtitle:
+    def get_matches(self, video):
+        if isinstance(video, Episode):
+            self.matches.update(["series", "season", "episode"])
+        elif isinstance(video, Movie):
+            self.matches.update(["title"])
+
+        return self.matches
+
+class Provider:
     def query(self, language, sub):
+        video = sub.video
         if sub.task == "translate":
             if language.alpha3 != "eng":
                 return None
+        sub.release_info = f'{sub.task} test'
         return sub
+    def detect(self, path):
+        if True:
+            video_name = path if self.pass_video_name else None
     def download(self, subtitle, input_language, video_name, out):
         if subtitle.task == "error":
             return
@@ -182,6 +197,7 @@ def test_hook_rejects_unknown_and_preserves_idempotence(monkeypatch):
             output_language = subtitle.audio_language
         else:
             output_language = "eng"
+        video_name = subtitle.video.original_path if self.pass_video_name else None
         r = self.session.post(f"{self.endpoint}/asr",
                               params={'task': subtitle.task, 'language': input_language, 'output': 'srt', 'encode': 'false',
                                       'video_file': video_name},
@@ -209,5 +225,25 @@ def test_hook_rejects_unknown_and_preserves_idempotence(monkeypatch):
         provider.download(sub, "en", None, b"pcm")
     provider.endpoint = "http://whisper-arc:9000"
     assert provider.query(SimpleNamespace(alpha3="spa"), sub) is sub
+    assert "Show.S01E02.mkv" in sub.release_info
+    # Metadata boosts are based on the exact input path and known equal fields.
+    class Episode:
+        pass
+    class Movie:
+        pass
+    env.update(Episode=Episode, Movie=Movie)
+    video = Episode()
+    video.original_path = sub.video.original_path
+    video.year, video.source, video.release_group = 2017, "Blu-ray", "HANDJOB"
+    matched = env["MatchedSubtitle"]()
+    matched.matches = set()
+    matched.arc_source_path = video.original_path
+    matched.arc_source_fields = {"year": 2017, "source": "Blu-ray", "release_group": "HANDJOB", "resolution": None}
+    assert matched.get_matches(video) == {"series", "season", "episode", "year", "source", "release_group"}
+    video.source = "Web"
+    assert "source" not in matched.get_matches(video)
+    assert "hash" not in matched.matches
+    video.original_path = "/different/episode.mkv"
+    assert matched.get_matches(video) == set()
     sub.audio_language = "fra"
     assert provider.query(SimpleNamespace(alpha3="spa"), sub) is None

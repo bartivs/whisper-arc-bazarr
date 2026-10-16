@@ -21,6 +21,10 @@ services:
       - TRANSLATION_API_KEY=${TRANSLATION_API_KEY:-}
       # Fall back to the local model if the proxy fails or returns junk.
       - TRANSLATION_LOCAL_FALLBACK=${TRANSLATION_LOCAL_FALLBACK:-true}
+      # Unix/POSIX locale notation. The target locale drives the regional prompt
+      # (e.g. Mexican Spanish); the offline fallback is generic Spanish only.
+      - TRANSLATION_SOURCE_LOCALE=${TRANSLATION_SOURCE_LOCALE:-en_US.UTF-8}
+      - TRANSLATION_TARGET_LOCALE=${TRANSLATION_TARGET_LOCALE:-es_MX.UTF-8}
       # Request logs name the media file Bazarr sends as video_file. Extra
       # requests queue for the single pipeline instead of failing immediately.
       - WHISPER_LOG_LEVEL=${WHISPER_LOG_LEVEL:-INFO}

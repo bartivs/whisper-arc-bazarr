@@ -11,6 +11,7 @@ because Bazarr turns a 503 into a failed download (and the provider hook raises
 on non-2xx responses).
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -18,10 +19,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
+from languages import SOURCE_LOCALE, TARGET_LOCALE, parse_locale
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 
@@ -39,6 +42,8 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 _pipeline = None
 _gate = threading.Lock()
 _waiters = threading.BoundedSemaphore(MAX_WAITERS)
+_queue = deque()
+_queue_changed = threading.Condition()
 
 LOG = logging.getLogger("whisper_arc")
 LOG.setLevel(os.environ.get("WHISPER_LOG_LEVEL", "INFO").upper())
@@ -58,9 +63,9 @@ def source_label(video_file, upload):
 
 def log_event(event, *, name, path="", **fields):
     """One greppable line per request transition, keyed by media file name."""
-    parts = [f'file="{name}"']
+    parts = [f'file={json.dumps(name, ensure_ascii=False)}']
     if path and path != name:
-        parts.append(f'path="{path}"')
+        parts.append(f'path={json.dumps(path, ensure_ascii=False)}')
     parts.extend(f"{key}={value}" for key, value in fields.items() if value is not None)
     LOG.info("%s %s", event, " ".join(parts))
 
@@ -69,20 +74,30 @@ def log_event(event, *, name, path="", **fields):
 def exclusive():
     """Run one request at a time, queueing bounded waiters instead of dropping them."""
     waited = 0.0
-    if not _gate.acquire(blocking=False):
-        if not _waiters.acquire(blocking=False):
-            raise HTTPException(503, "Whisper queue is full", headers={"Retry-After": "30"})
-        try:
+    with _queue_changed:
+        if _queue or not _gate.acquire(blocking=False):
+            if not _waiters.acquire(blocking=False):
+                raise HTTPException(503, "Whisper queue is full", headers={"Retry-After": "30"})
+            ticket = object()
+            _queue.append(ticket)
             started = time.monotonic()
-            if not _gate.acquire(timeout=GATE_WAIT_SECONDS):
-                raise HTTPException(503, "Whisper queue wait timed out", headers={"Retry-After": "60"})
-            waited = time.monotonic() - started
-        finally:
-            _waiters.release()
+            try:
+                while _queue[0] is not ticket or not _gate.acquire(blocking=False):
+                    remaining = GATE_WAIT_SECONDS - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise HTTPException(503, "Whisper queue wait timed out", headers={"Retry-After": "60"})
+                    _queue_changed.wait(min(remaining, 0.1))
+                waited = time.monotonic() - started
+            finally:
+                _queue.remove(ticket)
+                _waiters.release()
+                _queue_changed.notify_all()
     try:
         yield waited
     finally:
-        _gate.release()
+        with _queue_changed:
+            _gate.release()
+            _queue_changed.notify_all()
 
 
 def failure_detail(exc):
@@ -190,7 +205,8 @@ def detect(pcm):
 @app.get("/status")
 def status():
     """Bazarr's Test Connection button expects JSON containing a version string."""
-    return {"version": "whisper-arc-openvino-base-1"}
+    return {"version": "whisper-arc-openvino-base-3", "source_locale": SOURCE_LOCALE.unix,
+            "target_locale": TARGET_LOCALE.unix}
 
 
 @app.get("/health")
@@ -199,7 +215,8 @@ def health():
 
     if "GPU" not in ov.Core().available_devices or not Path(MODEL_DIR, "generation_config.json").is_file():
         raise HTTPException(503, "Intel GPU or Whisper model unavailable")
-    return {"device": ov.Core().get_property("GPU", "FULL_DEVICE_NAME"), "model": "base"}
+    return {"device": ov.Core().get_property("GPU", "FULL_DEVICE_NAME"), "model": "base",
+            "source_locale": SOURCE_LOCALE.unix, "target_locale": TARGET_LOCALE.unix}
 
 
 @app.post("/asr")
@@ -209,6 +226,16 @@ def asr(audio_file: UploadFile = File(...), task: str = "transcribe", language: 
     log_event("asr start", name=name, path=path, task=task, language=language or "-",
               target=target_language or "-", encode=encode)
     try:
+        try:
+            if language and len(language) > 2:
+                language = parse_locale(language).language
+            if target_language and len(target_language) > 2:
+                locale = parse_locale(target_language)
+                if locale.region and locale != TARGET_LOCALE:
+                    raise ValueError("Requested target locale differs from configured target locale")
+                target_language = locale.language
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if task not in ("transcribe", "translate") or output != "srt":
             raise HTTPException(400, "Only transcribe/translate with SRT output is supported")
         if language and (len(language) != 2 or not language.isalpha()):
@@ -222,13 +249,15 @@ def asr(audio_file: UploadFile = File(...), task: str = "transcribe", language: 
                 # Whisper cannot target Spanish. First transcribe English, then
                 # translate cue text only; keep all generated SRT timings unchanged.
                 data = transcribe(pcm_path(audio_file, encode, directory), "transcribe" if target_language else task, language or "")
+                log_event("asr transcribed", name=name, cues=cue_count(data))
                 if target_language:
                     from translation import translate_srt
 
                     try:
-                        data = translate_srt(data)
+                        data = translate_srt(data, media_name=name)
                     except (RuntimeError, ValueError, OSError) as exc:
-                        raise HTTPException(503, "Local Spanish translation failed; no subtitles returned") from exc
+                        log_event("translation failed", name=name, reason=type(exc).__name__)
+                        raise HTTPException(503, "Spanish translation failed; no subtitles returned") from exc
         cues = cue_count(data)
         log_event("asr ok" if cues else "asr empty", name=name, path=path, cues=cues,
                   bytes_out=len(data), seconds=round(time.monotonic() - started, 1))

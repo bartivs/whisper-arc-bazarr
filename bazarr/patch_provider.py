@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 
 UPSTREAM_SHA256 = "257c450de9c0e2fa86a30582f9b8b4446756b197755c2c354a9ed604bdc92ed7"  # pragma: allowlist secret (public source checksum)
-MARKER = "# whisper-arc-bazarr Spanish provider extension v2"
-PREVIOUS_MARKER = "# whisper-arc-bazarr Spanish provider extension v1"
+MARKER = "# whisper-arc-bazarr Spanish provider extension v3"
+PREVIOUS_MARKERS = ("# whisper-arc-bazarr Spanish provider extension v1", "# whisper-arc-bazarr Spanish provider extension v2")
 REPLACEMENTS = [
     ('            if language.alpha3 != "eng":',
      '            if language.alpha3 != "eng" and not (language.alpha3 == "spa" and sub.audio_language == "eng" and self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT")):'),
@@ -28,11 +28,45 @@ REPLACEMENTS = [
      "                                      **({'target_language': 'es'} if output_language == 'spa' and self.endpoint == os.environ.get('WHISPER_TRANSLATION_ENDPOINT') else {})},\n"
      "                              files={'audio_file': out},"),
     ("        subtitle.content = r.content", "        r.raise_for_status()\n        subtitle.content = r.content"),
+    ('''    def get_matches(self, video):
+        if isinstance(video, Episode):
+            self.matches.update(["series", "season", "episode"])
+        elif isinstance(video, Movie):
+            self.matches.update(["title"])
+
+        return self.matches
+''', '''    def get_matches(self, video):
+        bound = getattr(self, "arc_source_path", None)
+        if bound is not None:
+            self.matches.clear()
+            if os.path.normpath(video.original_path) != bound:
+                return self.matches
+        if isinstance(video, Episode):
+            self.matches.update(["series", "season", "episode"])
+        elif isinstance(video, Movie):
+            self.matches.update(["title"])
+        if bound is not None:
+            # Generated from this exact input, not inferred from an external release.
+            # Only populated, equal fields qualify. Never fabricate hash or HI matches.
+            self.matches.update(key for key, value in self.arc_source_fields.items()
+                                if value is not None and value != "" and value == getattr(video, key, None))
+        return self.matches
+'''),
+    ("        sub.release_info = f'{sub.task}",
+     '        if self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT"):\n'
+     '            sub.arc_source_path = os.path.normpath(video.original_path)\n'
+     '            sub.arc_source_fields = {key: getattr(video, key, None) for key in\n'
+     '                ("year", "source", "release_group", "resolution", "video_codec", "audio_codec", "streaming_service", "edition")}\n'
+     "        sub.release_info = f'{os.path.basename(video.original_path) + \" | \" if getattr(sub, \"arc_source_path\", None) else \"\"}{sub.task}"),
+    ('            video_name = path if self.pass_video_name else None',
+     '            video_name = path if self.pass_video_name or self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT") else None'),
+    ('        video_name = subtitle.video.original_path if self.pass_video_name else None',
+     '        video_name = subtitle.video.original_path if self.pass_video_name or self.endpoint == os.environ.get("WHISPER_TRANSLATION_ENDPOINT") else None'),
 ]
 
 
 def patch(source):
-    if source.endswith("\n" + PREVIOUS_MARKER + "\n"):
+    if any(source.endswith("\n" + marker + "\n") for marker in PREVIOUS_MARKERS):
         # Only an in-place container layer can hold the old marker; a recreated
         # container starts from the pristine image file and takes the patched path.
         raise RuntimeError("Older Whisper extension found; recreate the Bazarr container to re-apply this hook")
