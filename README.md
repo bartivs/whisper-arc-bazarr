@@ -3,9 +3,13 @@
 [![Tests](https://github.com/bartivs/whisper-arc-bazarr/actions/workflows/test.yml/badge.svg)](https://github.com/bartivs/whisper-arc-bazarr/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Generate **local AI subtitles for [Bazarr](https://www.bazarr.media/)** with **Intel Arc GPU acceleration**, **OpenAI Whisper** and **OpenVINO**. This self-hosted Docker service transcribes movie and TV audio into SRT subtitles and optionally translates dialogue into **Spanish**, including neutral Latin American Spanish.
+Generate **local AI subtitles for [Bazarr](https://www.bazarr.media/)** with **Intel Arc GPU acceleration**, **OpenAI Whisper** and **OpenVINO**. This self-hosted Docker service turns movie and TV audio into SRT subtitles in three modes:
 
-No media mounts or published host ports. Fully offline English → Spanish translation needs no API keys; other source languages require a LiteLLM or OpenAI-compatible translation proxy. Audio stays local even when proxy translation is enabled.
+- **Same-language transcription:** generate subtitles in the original audio language, for languages supported by Whisper.
+- **Translation into English:** use Whisper's native translation to turn supported non-English audio into English subtitles, entirely locally.
+- **Optional translation into Spanish:** add the Spanish extension for English → Spanish offline, or other source languages → Spanish through a LiteLLM/OpenAI-compatible proxy. The proxy supports a neutral Latin American Spanish prompt.
+
+Spanish is the only target of the **added text-translation layer**, not the only supported subtitle language. Transcription and native English translation need no API keys; only proxy-based Spanish translation requires a configured endpoint/key. No media mounts or published host ports. Audio stays local even when proxy translation is enabled.
 
 ## Features
 
